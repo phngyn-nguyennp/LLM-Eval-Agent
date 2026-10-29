@@ -1367,6 +1367,94 @@ def calibrate_report(repo: str, feature: str, batch: str | None, labeler: str | 
     console.print(f"[dim]Saved {out}[/dim]")
 
 
+@calibrate.command("try")
+@click.option("--repo", required=True)
+@click.option("--feature", required=True)
+@click.option("--version", "rubric_version", required=True, help="Rubric version to try (its draft is used if not approved yet)")
+@click.option("--batch", help="Batch whose stored transcripts are re-judged (default: latest)")
+@click.option("--labeler", help="Reference labels to compare against (default: all)")
+@click.option("--runs", default=3, show_default=True)
+@click.option("--concurrency", default=4, show_default=True)
+@click.option("--model", envvar=["JUDGE_MODEL", "LLM_MODEL_NAME"], default=DEFAULT_MODEL, show_default=True)
+@click.option("--base-url", envvar=["JUDGE_BASE_URL", "LLM_BASE_URL"])
+@click.option("--api-key", envvar=["JUDGE_API_KEY", "LLM_API_KEY"], default="not-needed")
+def calibrate_try(repo: str, feature: str, rubric_version: str, batch: str | None, labeler: str | None, runs: int,
+                  concurrency: int, model: str, base_url: str, api_key: str):
+    """Before approving a rubric: re-judge labelled transcripts with it and compare agreement with the current one.
+
+    Nothing is saved to the run history; results go to calibration/<...>/try-<version>.json.
+    """
+    from eval_agent.calibration import agreement
+    from eval_agent.judge import judge_transcript
+
+    reg = get_registry()
+    rubric_path = reg.resolve_rubric_path(repo, feature, rubric_version)
+    if not rubric_path.exists():
+        rubric_path = rubric_path.with_suffix(".draft.yaml")
+    if not rubric_path.exists():
+        console.print(f"[red]No rubric or draft for {rubric_version}[/red]")
+        return
+    store = get_store()
+    batch, stored = batch_or_latest(store, repo, feature, batch)
+    labels = store.human_labels([r["id"] for r in stored]) if stored else []
+    store.close()
+    if labeler:
+        labels = [l for l in labels if l["labeler"] == labeler]
+    if not labels:
+        console.print("[red]No reference labels for this batch — run calibrate export/import first[/red]")
+        return
+    ref: dict[tuple[str, str], list[float]] = {}
+    for l in labels:
+        ref.setdefault((l["run_id"], l["dimension"]), []).append(l["score"])
+    labelled = [r for r in stored if any(k[0] == r["id"] for k in ref)]
+    console.print(f"Re-judging {len(labelled)} labelled transcripts with {rubric_path.name} × {runs} runs (not saved)...")
+
+    async def _run():
+        sem = asyncio.Semaphore(concurrency)
+
+        async def one(r: dict):
+            async with sem:
+                try:
+                    res = await judge_transcript(json.loads(r["transcript"]), rubric_path, model=model,
+                                                 base_url=base_url, api_key=api_key, runs=runs)
+                except Exception as e:
+                    console.print(f"  [red]{r['config_name']}: {e}[/red]")
+                    return None
+            console.print(f"  [dim]done {r['config_name'] or r['id'][:8]}[/dim]")
+            return r["id"], {d.name: d.score for d in res.dimensions}
+
+        return [x for x in await asyncio.gather(*[one(r) for r in labelled]) if x]
+
+    new_scores = dict(asyncio.run(_run()))
+    old_scores = {r["id"]: {d["dimension"]: d["score"] for d in r["dimensions"]} for r in labelled}
+
+    table = Table(title=f"Agreement with reference: {stored[0]['rubric_ver']} (stored) vs {rubric_version} (try)\n"
+                        f"reference: {', '.join(sorted({l['labeler'] for l in labels}))}")
+    for col in ("Dimension", "MAE old→new", "within ±2 old→new", "bias old→new", "Spearman old→new", "Trusted old→new"):
+        table.add_column(col)
+    result = {}
+    for dim in dict.fromkeys(k[1] for k in ref):
+        keys = [k for k in ref if k[1] == dim and k[0] in new_scores and dim in new_scores[k[0]] and dim in old_scores.get(k[0], {})]
+        if not keys:
+            continue
+        human = [statistics.mean(ref[k]) for k in keys]
+        a = agreement([old_scores[k[0]][dim] for k in keys], human)
+        b = agreement([new_scores[k[0]][dim] for k in keys], human)
+        result[dim] = {"old": a, "new": b}
+        rho = lambda x: "n/a" if x is None else f"{x:.2f}"
+        yes = lambda t: "yes" if t else "no"
+        table.add_row(dim, f"{a['mae']:.1f} → {b['mae']:.1f}", f"{a['within2']:.0%} → {b['within2']:.0%}",
+                      f"{a['bias']:+.1f} → {b['bias']:+.1f}", f"{rho(a['spearman'])} → {rho(b['spearman'])}",
+                      f"{yes(a['trusted'])} → {yes(b['trusted'])}")
+    console.print(table)
+    console.print("[dim]Caveat: tuning a rubric on the same items it is checked on overstates the gain; confirm on a new batch.[/dim]")
+    out = HOME / "calibration" / f"{repo}-{feature}-{batch}" / f"try-{rubric_version}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({"batch": batch, "rubric": str(rubric_path), "runs": runs, "agreement": result,
+                               "scores": new_scores}, indent=2))
+    console.print(f"[dim]Saved {out}[/dim]")
+
+
 @main.command("stability")
 @click.option("--repo", required=True)
 @click.option("--feature", required=True)

@@ -4,7 +4,7 @@ Version của tool nằm ở `eval_agent/__version__`, kiểm bằng `eval-agent
 
 ## 0.3.0 — 2026-10-29
 
-- **Versioning.** Thêm các lệnh `rubric versions`, `rubric new-version`, `rubric diff`, `batches`, `compare`.
+- **Versioning.** Thêm các lệnh `rubric versions`, `rubric new-version`, `rubric diff`, `batches`, `compare`, và `calibrate try` (kiểm bản nháp rubric so với nhãn tham chiếu trước khi duyệt).
   - Version mới chỉ thành active khi được duyệt ở CP3. Bản cũ vẫn chấm được trong lúc chờ, duyệt xong mới bị archive.
   - Mỗi run lưu `tool_version`, `rubric_hash`, `judge_prompt_hash`.
   - Report của `analyze` và nhật ký agent ghi lại version của prompt.

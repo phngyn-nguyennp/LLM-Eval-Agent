@@ -205,6 +205,8 @@ Có ba thứ được gắn version. Mỗi run lưu lại version của cả ba,
 
 Bản cũ vẫn chấm được trong suốt thời gian này, và chỉ bị archive khi bản mới được duyệt. Baseline gắn theo version rubric, nên version mới cần baseline mới.
 
+**Kiểm bản nháp trước khi duyệt:** `calibrate try --version v1.1.1` chấm lại các transcript đã có nhãn bằng bản nháp, rồi in mức khớp với nhãn tham chiếu của bản cũ và bản mới, cạnh nhau. Kết quả không lưu vào lịch sử chấm. Nhờ vậy, khi duyệt CP3 người duyệt có số liệu trong tay.
+
 **So sánh hai batch:** dùng `compare`, hoặc `batches` để xem danh sách. Nếu hai batch được chấm bằng rubric hoặc judge khác nhau, `compare` cảnh báo **"Not a like-for-like comparison"**. Điểm đổi lúc đó có thể do thước đo đổi, không phải do sản phẩm đổi. Agent cũng dùng `compare` và được dặn không gọi đó là regression.
 
 ## Lịch sử và baseline
