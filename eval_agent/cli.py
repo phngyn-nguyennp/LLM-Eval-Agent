@@ -1135,7 +1135,8 @@ def calibrate_import(sheet: str, by: str | None):
 @click.option("--repo", required=True)
 @click.option("--feature", required=True)
 @click.option("--batch", help="Batch ID (default: latest)")
-def calibrate_report(repo: str, feature: str, batch: str | None):
+@click.option("--labeler", help="Only this labeler's scores (default: all labelers, averaged)")
+def calibrate_report(repo: str, feature: str, batch: str | None, labeler: str | None):
     """Judge vs human agreement per dimension, and on the final PASS/FAIL."""
     from eval_agent.calibration import TRUST_MAE, TRUST_SPEARMAN, TRUST_WITHIN2, agreement
     from eval_agent.rubric_loader import load_rubric
@@ -1146,6 +1147,9 @@ def calibrate_report(repo: str, feature: str, batch: str | None):
         return
     labels = store.human_labels([r["id"] for r in runs])
     store.close()
+    if labeler:
+        labels = [l for l in labels if l["labeler"] == labeler]
+    labelers = sorted({l["labeler"] for l in labels})
     if not labels:
         console.print(f"[yellow]No human labels for batch {batch} — start with `eval-agent calibrate export`[/yellow]")
         return
@@ -1156,7 +1160,7 @@ def calibrate_report(repo: str, feature: str, batch: str | None):
     judge = {(r["id"], d["dimension"]): d["score"] for r in runs for d in r["dimensions"]}
     weights = {d["dimension"]: d["weight"] for r in runs for d in r["dimensions"]}
 
-    table = Table(title=f"Judge vs human — {repo}/{feature} batch {batch}")
+    table = Table(title=f"Judge vs reference — {repo}/{feature} batch {batch}\nreference labeler(s): {', '.join(labelers)}")
     for col in ("Dimension", "n", "MAE", "within ±2", "bias (judge−human)", "Spearman", "Trusted"):
         table.add_column(col, justify="right" if col not in ("Dimension", "Trusted") else "left")
     summary = {}
@@ -1189,9 +1193,10 @@ def calibrate_report(repo: str, feature: str, batch: str | None):
     console.print(f"\n[dim]Trusted = within ±2 ≥ {TRUST_WITHIN2:.0%}, MAE ≤ {TRUST_MAE}, Spearman ≥ {TRUST_SPEARMAN}[/dim]")
     if untrusted:
         console.print(f"[bold]Not trusted yet:[/bold] {', '.join(untrusted)} — tighten their rubric wording or the judge prompt, then re-check")
-    out = HOME / "calibration" / f"{repo}-{feature}-{batch}" / "agreement.json"
+    suffix = f"-{labeler}" if labeler else ""
+    out = HOME / "calibration" / f"{repo}-{feature}-{batch}" / f"agreement{suffix}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps({"batch": batch, "dimensions": summary,
+    out.write_text(json.dumps({"batch": batch, "labelers": labelers, "dimensions": summary,
                                "verdicts": [dict(zip(("item", "judge", "human"), v)) for v in verdicts]}, indent=2))
     console.print(f"[dim]Saved {out}[/dim]")
 

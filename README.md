@@ -261,6 +261,28 @@ Báo cáo từng dimension gồm:
 
 Một dimension được coi là **đáng tin** khi lệch không quá ±2 ở ít nhất 70% item, MAE ≤ 2, và Spearman ≥ 0.5. Dimension chưa đáng tin thì phải sửa câu chữ trong rubric hoặc prompt của judge, rồi đo lại.
 
+### Kết quả đối chiếu trên ISI213 (người tham chiếu là model, chưa phải người)
+
+Người tham chiếu ở đây là **3 agent Claude Opus độc lập**. Chúng chỉ được đọc `GUIDE.md` và file plan, không thấy điểm judge. Nhãn lưu dưới tên `claude-opus-blind`, tách khỏi nhãn của người. Phép đo này cho biết judge (Apero-LLM) lệch bao nhiêu so với một model mạnh hơn chấm độc lập. **Nó không thay được việc đối chiếu với người.**
+
+| Dimension | MAE | Lệch ≤ ±2 | Bias (judge − tham chiếu) | Spearman | Đáng tin |
+|---|---|---|---|---|---|
+| `profile_safety_judgement` | 1.7 | 87% | +1.7 | 0.81 | ✅ |
+| `explain_truthfulness` | 2.1 | 60% | +2.1 | 0.69 | ❌ |
+| `session_part_fit` | 1.5 | 87% | +1.5 | 0.33 | ❌ |
+| `focus_and_full_body_balance` | 1.5 | 80% | +1.3 | −0.39 | ❌ |
+| `progression_and_variety` | 1.1 | 100% | +0.8 | −0.21 | ❌ |
+
+PASS/FAIL khớp 15/15, nhưng con số này ít ý nghĩa vì cả hai bên đều chấm FAIL toàn bộ.
+
+Phát hiện:
+1. **Judge chấm rộng tay một cách có hệ thống.** Bias dương ở cả 5 dimension, từ +0.8 đến +2.1 điểm.
+2. **`explain_truthfulness`: judge chỉ cho 5 hoặc 10.** Judge cho 10 ở `bench-m3` và `bench-m4`, trong khi explain nói "tránh bài nặng lưng/gối" mà plan lại có `mountain-climber`, `sumo-squat`, `scissor-kicks`. Tức là judge không đối chiếu từng câu explain với các buổi tập.
+3. **Ba dimension còn lại bị nén thang điểm.** Judge chỉ dùng 2–4 (`session_part_fit`) hoặc 4–7 điểm, nên gần như không phân biệt được plan tốt với plan kém. Spearman thấp chủ yếu vì vậy.
+4. **`profile_safety_judgement` đáng tin nhất**, nhưng có một lỗi: judge cho 10 ở `bench-01` (người chưa tập bao giờ, không đau khớp) dù plan có `walking-lunges` và `push-ups` ngay tuần 1. Rubric chỉ miễn trừ cho người *regular*, không miễn trừ cho người *never*.
+
+Việc tiếp theo: sửa câu chữ rubric cho 4 dimension chưa đáng tin (thêm ví dụ neo điểm 2–3 và 7–8; buộc đối chiếu từng câu explain với các buổi), tạo version rubric mới, duyệt CP3, rồi đo lại. Đồng thời cần **người thật chấm** ít nhất 5 plan × 2 dimension để kiểm lại chính model tham chiếu.
+
 ### Truy vết
 
 Mỗi run lưu kèm:
@@ -286,7 +308,7 @@ Phần lõi của agent là việc của AI Engineer: đưa LLM vào một quy t
 | Phân tích lỗi có ràng buộc | `analyze`, `eval/context/<feature>.md` | Gom lỗi thành giả thuyết nguyên nhân, neo vào kiến trúc thật để không đoán mò. Người duyệt ở CP4 |
 | Agent tool-calling có rào chắn | `agent.py` | LLM tự chọn bước. Danh sách tool cho phép, giới hạn chi phí, kiểm tham số trước khi chạy, lưu vết. Không thể vượt checkpoint |
 
-Kết quả thật trên ISI213: 15 plan, 0/15 PASS. Agent tìm ra các lỗi có thật, như bài đặt sai phần buổi tập và bài không hợp người đau khớp, và report đã được gửi cho team sửa.
+Kết quả thật trên ISI213: 15 plan, 0/15 PASS. Agent tìm ra các lỗi có thật, như bài đặt sai phần buổi tập và bài không hợp người đau khớp, và report đã được gửi cho team sửa. Khi đo lại chính judge, agent phát hiện judge chấm rộng tay (+0.8 đến +2.1 điểm) và chỉ có 1/5 dimension đáng tin. Từ đó có việc cụ thể để sửa rubric (xem "Độ tin cậy của judge").
 
 ## Các module
 
