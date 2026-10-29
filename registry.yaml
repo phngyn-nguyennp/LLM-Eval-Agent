@@ -1,0 +1,43 @@
+repos:
+  artimind:
+    base_url: ''
+    eval_dir: eval
+    features:
+      memory-chat:
+        active_version: v1.0
+        adapter: chatbot-sim
+        versions:
+          v1.0:
+            status: draft
+    path: /data/nguyennp/AI-Chatbot-Artimind
+  english-tutor:
+    base_url: http://45.78.203.38:8016
+    eval_dir: eval
+    features:
+      ai-character:
+        active_version: v1.9
+        adapter: chatbot-sim
+        versions:
+          v1.9:
+            po_spec_doc: UsAyUrDhyQK7KRq6GyEbo
+            status: draft
+      lesson-flow:
+        active_version: v1.9
+        adapter: lesson-eval
+        api_url: http://45.78.203.38:8018/eval-lesson
+        versions:
+          v1.9:
+            po_spec_doc: uyT5AsSn88XfeJppinIBm
+            status: draft
+    path: /data/nguyennp/AI-Core-English-Tutor-SPM
+  mini-chatbot:
+    base_url: ''
+    eval_dir: eval
+    features:
+      refyn-plan:
+        active_version: v1.1.0
+        adapter: refyn-plan
+        versions:
+          v1.1.0:
+            status: approved
+    path: /data/nguyennp/AI-Mini-Chatbot

@@ -1,0 +1,9 @@
+.env
+eval.db
+__pycache__/
+*.pyc
+build/
+*.egg-info/
+reports/
+calibration/
+agent-logs/
