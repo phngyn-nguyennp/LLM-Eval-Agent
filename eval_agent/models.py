@@ -77,6 +77,7 @@ class EvalResult:
     created_at: datetime = field(default_factory=datetime.utcnow)
     judge_prompt_hash: str = ""
     rubric_hash: str = ""
+    tool_version: str = ""
 
 
 @dataclass

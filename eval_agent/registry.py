@@ -149,25 +149,39 @@ class Registry:
         feature: str,
         version: str,
         po_spec_doc: str | None = None,
-        set_active: bool = True,
+        stage: Stage | None = None,
     ):
+        """Register a draft version. It only becomes active once its rubric is approved,
+        so the current approved version keeps working while the new one is under review."""
         feat = self.get_feature(repo, feature)
         feat.versions[version] = VersionInfo(
             status=Status.DRAFT,
             po_spec_doc=po_spec_doc,
             created_at=str(datetime.utcnow().date()),
+            stage=stage,
         )
-        if set_active:
-            if feat.active_version and feat.active_version in feat.versions:
-                feat.versions[feat.active_version].status = Status.ARCHIVED
+        current = feat.versions.get(feat.active_version or "")
+        if not current or current.status != Status.APPROVED:
             feat.active_version = version
 
     def approve_version(self, repo: str, feature: str, version: str, by: str = "", at: str = ""):
-        v = self.get_feature(repo, feature).versions[version]
+        feat = self.get_feature(repo, feature)
+        v = feat.versions[version]
         v.status = Status.APPROVED
         v.stage = Stage.APPROVED
         v.approved_by = by
         v.approved_at = at
+        if feat.active_version != version:
+            previous = feat.versions.get(feat.active_version or "")
+            if previous and previous.status == Status.APPROVED:
+                previous.status = Status.ARCHIVED
+            feat.active_version = version
+
+    def pending_versions(self, repo: str, feature: str) -> dict[str, VersionInfo]:
+        """Versions under review that are not the active one."""
+        feat = self.get_feature(repo, feature)
+        return {name: v for name, v in feat.versions.items()
+                if name != feat.active_version and v.status == Status.DRAFT}
 
     def is_approved(self, repo: str, feature: str, version: str | None = None) -> bool:
         feat = self.get_feature(repo, feature)

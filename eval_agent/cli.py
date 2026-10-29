@@ -15,6 +15,7 @@ import click
 from rich.console import Console
 from rich.table import Table
 
+from eval_agent import __version__
 from eval_agent.home import get_home, init_home, load_env
 from eval_agent.models import Stage, Status
 from eval_agent.registry import Registry
@@ -37,6 +38,7 @@ def get_store() -> Store:
 
 
 @click.group()
+@click.version_option(__version__, prog_name="eval-agent")
 def main():
     """Continuous Eval Agent — evaluate LLM products from PO specs."""
     pass
@@ -409,6 +411,84 @@ def rubric_approve(repo: str, feature: str, version: str, by: str | None):
     approve_rubric(reg, repo, feature, version, reviewer_name(by))
 
 
+@rubric.command("versions")
+@click.option("--repo", required=True)
+@click.option("--feature", required=True)
+def rubric_versions(repo: str, feature: str):
+    """List every rubric version of a feature: status, who approved it, content hash."""
+    from eval_agent.judge import file_hash
+
+    reg = get_registry()
+    feat = reg.get_feature(repo, feature)
+    table = Table(title=f"Rubric versions — {repo}/{feature}")
+    for col in ("Version", "Active", "Status", "Stage", "Approved by", "Approved at", "Created", "Hash"):
+        table.add_column(col)
+    for name, v in feat.versions.items():
+        path = reg.resolve_rubric_path(repo, feature, name)
+        draft = path.with_suffix(".draft.yaml")
+        h = file_hash(path) if path.exists() else (file_hash(draft) + " (draft)" if draft.exists() else "-")
+        table.add_row(name, "●" if name == feat.active_version else "", v.status.value, v.stage.value if v.stage else "-",
+                      v.approved_by or "-", v.approved_at or "-", v.created_at or "-", h)
+    console.print(table)
+
+
+@rubric.command("new-version")
+@click.option("--repo", required=True)
+@click.option("--feature", required=True)
+@click.option("--to", "to_version", required=True, help="New version name, e.g. v1.1.1")
+@click.option("--from", "from_version", help="Version to start from (default: active)")
+def rubric_new_version(repo: str, feature: str, to_version: str, from_version: str | None):
+    """Start a new rubric version as a draft copy; the current version stays active until CP3 approves the new one."""
+    reg = get_registry()
+    feat = reg.get_feature(repo, feature)
+    from_version = from_version or feat.active_version
+    if to_version in feat.versions:
+        console.print(f"[red]{to_version} already exists[/red]")
+        return
+    src = reg.resolve_rubric_path(repo, feature, from_version)
+    if not src.exists():
+        console.print(f"[red]No approved rubric for {from_version} at {src}[/red]")
+        return
+    lines = [l for l in src.read_text().splitlines() if not l.strip().startswith(("approved_by:", "approved_at:"))]
+    lines = [f'  version: "{to_version}"' if l.strip().startswith("version:") and l.startswith("  ") else l for l in lines]
+    draft = reg.resolve_rubric_path(repo, feature, to_version).with_suffix(".draft.yaml")
+    draft.write_text("\n".join(lines) + "\n")
+    spec_src = reg.resolve_ai_spec_path(repo, feature, from_version)
+    if spec_src.exists():
+        spec_dst = reg.resolve_ai_spec_path(repo, feature, to_version)
+        spec_dst.write_text(spec_src.read_text())
+    reg.add_version(repo, feature, to_version, stage=Stage.RUBRIC_REVIEW)
+    reg.save()
+    console.print(f"[green]{to_version} created from {from_version}; {from_version} stays active until {to_version} is approved[/green]")
+    print_checkpoint(3, "Review the rubric", draft, repo, feature, to_version,
+                     f"Edit the draft, then compare: eval-agent rubric diff --repo {repo} --feature {feature} --from {from_version} --to {to_version}")
+
+
+@rubric.command("diff")
+@click.option("--repo", required=True)
+@click.option("--feature", required=True)
+@click.option("--from", "from_version", required=True)
+@click.option("--to", "to_version", required=True)
+def rubric_diff(repo: str, feature: str, from_version: str, to_version: str):
+    """Unified diff between two rubric versions (uses the draft when a version is not approved yet)."""
+    import difflib
+
+    reg = get_registry()
+
+    def path_of(ver: str) -> Path | None:
+        p = reg.resolve_rubric_path(repo, feature, ver)
+        return p if p.exists() else (p.with_suffix(".draft.yaml") if p.with_suffix(".draft.yaml").exists() else None)
+
+    a, b = path_of(from_version), path_of(to_version)
+    if not a or not b:
+        console.print(f"[red]Missing rubric for {from_version if not a else to_version}[/red]")
+        return
+    diff = difflib.unified_diff(a.read_text().splitlines(), b.read_text().splitlines(),
+                                fromfile=f"{from_version} ({a.name})", tofile=f"{to_version} ({b.name})", lineterm="")
+    out = "\n".join(diff)
+    print(out or "No differences")
+
+
 @rubric.command("show")
 @click.option("--repo", required=True)
 @click.option("--feature", required=True)
@@ -550,6 +630,7 @@ def eval_cmd(repo: str, feature: str, transcript: str, config_file: str | None, 
                 transcript=messages,
                 judge_prompt_hash=judge_prompt_hash(),
                 rubric_hash=file_hash(rubric_path),
+                tool_version=__version__,
             )
             store = get_store()
             run_id = store.save_eval_run(eval_result, batch_id)
@@ -711,6 +792,7 @@ def run_cmd(repo: str, feature: str, only: tuple[str, ...], model: str, base_url
                 transcript=transcript,
                 judge_prompt_hash=judge_prompt_hash(),
                 rubric_hash=file_hash(rubric_path),
+                tool_version=__version__,
             )
             run_id = store.save_eval_run(eval_result, batch_id)
             regression = store.detect_regression(eval_result)
@@ -767,6 +849,88 @@ def run_cmd(repo: str, feature: str, only: tuple[str, ...], model: str, base_url
 
 
 # ─── History commands ───
+
+
+@main.command("batches")
+@click.option("--repo", required=True)
+@click.option("--feature", required=True)
+@click.option("--limit", default=20, show_default=True)
+def batches_cmd(repo: str, feature: str, limit: int):
+    """List eval batches with the versions they were judged with."""
+    store = get_store()
+    rows = store.batches(repo, feature, limit)
+    store.close()
+    table = Table(title=f"Batches — {repo}/{feature}")
+    for col in ("Batch", "Date", "Items", "PASS", "Mean", "Rubric", "Rubric hash", "Judge prompt", "Judge model", "Tool"):
+        table.add_column(col)
+    for b in rows:
+        table.add_row(b["batch_id"], b["created_at"][:16], str(b["n"]), str(b["passed"]), f"{b['mean']:.2f}",
+                      b["rubric_ver"] or "-", b["rubric_hash"] or "-", b["judge_prompt_hash"] or "-",
+                      b["judge_model"] or "-", b["tool_version"] or "-")
+    console.print(table)
+
+
+@main.command("compare")
+@click.option("--repo", required=True)
+@click.option("--feature", required=True)
+@click.option("--a", "batch_a", help="Older batch (default: the one before --b)")
+@click.option("--b", "batch_b", help="Newer batch (default: latest)")
+def compare_cmd(repo: str, feature: str, batch_a: str | None, batch_b: str | None):
+    """Compare two batches item by item; warns when they were judged with different versions."""
+    store = get_store()
+    all_batches = store.batches(repo, feature, limit=200)
+    ids = [b["batch_id"] for b in all_batches]
+    batch_b = batch_b or (ids[0] if ids else None)
+    if not batch_a and batch_b in ids and ids.index(batch_b) + 1 < len(ids):
+        batch_a = ids[ids.index(batch_b) + 1]
+    if not batch_a or not batch_b:
+        console.print("[red]Need two batches to compare[/red]")
+        store.close()
+        return
+    meta = {b["batch_id"]: b for b in all_batches}
+    runs_a, runs_b = store.batch_runs(batch_a), store.batch_runs(batch_b)
+    store.close()
+
+    console.print(f"[bold]{batch_a}[/bold]  →  [bold]{batch_b}[/bold]")
+    differs = []
+    for key, label in (("rubric_ver", "rubric version"), ("rubric_hash", "rubric content"),
+                       ("judge_prompt_hash", "judge prompt"), ("judge_model", "judge model"), ("tool_version", "eval-agent")):
+        va, vb = meta.get(batch_a, {}).get(key), meta.get(batch_b, {}).get(key)
+        mark = "" if va == vb else "  [yellow]⚠ changed[/yellow]"
+        console.print(f"  {label:15s} {va or '-'} → {vb or '-'}{mark}")
+        if va != vb and key != "tool_version":
+            differs.append(label)
+    if differs:
+        console.print(f"[yellow]⚠ Not a like-for-like comparison: {', '.join(differs)} changed. "
+                      "Score changes may come from the judge or rubric, not from the product.[/yellow]")
+
+    # Same item = same name, or for unnamed `eval` runs the same input config
+    by_a = {r["config_name"] or r["config_hash"]: r for r in runs_a}
+    by_b = {r["config_name"] or r["config_hash"]: r for r in runs_b}
+    common = [k for k in by_b if k in by_a]
+    table = Table(title=f"{len(common)} items in both batches")
+    for col in ("Item", "Overall A", "Overall B", "Δ", "Verdict"):
+        table.add_column(col, justify="right" if col.startswith(("Overall", "Δ")) else "left")
+    for k in common:
+        a, b = by_a[k], by_b[k]
+        d = b["overall"] - a["overall"]
+        color = "green" if d > 0.05 else "red" if d < -0.05 else "white"
+        table.add_row(k, f"{a['overall']:.2f}", f"{b['overall']:.2f}", f"[{color}]{d:+.2f}[/{color}]",
+                      f"{a['verdict']} → {b['verdict']}")
+    console.print(table)
+
+    dims: dict[str, list[float]] = {}
+    for k in common:
+        sa = {d["dimension"]: d["score"] for d in by_a[k]["dimensions"]}
+        for d in by_b[k]["dimensions"]:
+            if d["dimension"] in sa:
+                dims.setdefault(d["dimension"], []).append(d["score"] - sa[d["dimension"]])
+    for name, deltas in dims.items():
+        console.print(f"  {name:32s} mean Δ {sum(deltas) / len(deltas):+.1f}")
+    only_a = sorted(set(by_a) - set(by_b))
+    only_b = sorted(set(by_b) - set(by_a))
+    if only_a or only_b:
+        console.print(f"[dim]Only in A: {', '.join(only_a) or '-'} · only in B: {', '.join(only_b) or '-'}[/dim]")
 
 
 @main.command("history")
@@ -870,6 +1034,8 @@ def report_markdown_header(repo: str, feature: str, rubric_ver: str, batch: str,
         f"# Eval report — {repo} / {feature} {rubric_ver}",
         "",
         f"Batch `{batch}` · {runs[0]['created_at'][:16]} · **{passed}/{len(runs)} PASS** · mean overall {mean:.2f}",
+        "",
+        f"Versions: eval-agent {__version__} · rubric {rubric_ver} · analyze prompt {hashlib.sha256(ANALYZE_PROMPT.encode()).hexdigest()[:12]}",
         "",
         "> Status: PENDING REVIEW (CP4). Edit this file as needed, then `eval-agent report approve <id>`.",
         "",
@@ -1368,6 +1534,10 @@ def status_cmd(repo: str | None):
                         todo.append(f"next: analyze --repo {repo_name} --feature {feat_name}")
                     if not store.has_human_labels(repo_name, feat_name):
                         todo.append(f"next: check the judge against your own scores → calibrate export --repo {repo_name} --feature {feat_name}")
+            for pname, pv in reg.pending_versions(repo_name, feat_name).items():
+                pending = CHECKPOINTS.get(pv.stage) if pv.stage else (3, "Review the rubric")
+                todo.append(f"[yellow]YOU: CP{pending[0]} {pending[1]} for {pname}[/yellow] → eval-agent approve --repo {repo_name} --feature {feat_name} --version {pname}")
+                waiting += 1
             table.add_row(f"{repo_name}/{feat_name}", ver, stage, last, "\n".join(todo) or "[green]nothing pending[/green]")
 
     store.close()

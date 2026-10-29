@@ -6,6 +6,7 @@ prepare the work and say what is waiting on the human.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -15,6 +16,7 @@ from pathlib import Path
 
 from openai import OpenAI
 
+from eval_agent import __version__
 from eval_agent.registry import Registry
 from eval_agent.store import Store
 
@@ -30,6 +32,8 @@ How you work:
   say so and finish; do not re-run evals for no reason.
 - run_eval and check_stability are slow and costly: at most once per session each, and only when
   the target repo changed, there is no batch yet, or you have a concrete reason.
+- After a run, use compare_batches to see what changed against the previous batch. If it warns that
+  the rubric or judge changed, say the comparison is not like-for-like instead of claiming a regression.
 - After a run with failures or regressions, call analyze so a fix-suggestion report is ready.
 - You cannot approve rubrics, set baselines, approve or send reports, or import human labels.
   Those are human checkpoints. Never claim you did them; list them as waiting on the human.
@@ -56,6 +60,8 @@ TOOLS = [
          "only": {"type": "array", "items": {"type": "string"}, "description": "Optional item ids to limit the run"},
          "runs": {"type": "integer", "description": "Judge runs per item, 1-3 (default 3)"}},
          "required": ["repo", "feature"]}},
+    {"name": "compare_batches", "description": "Compare the latest batch with the one before it, item by item; flags when rubric/judge versions differ (then scores are not like-for-like).",
+     "parameters": {"type": "object", "properties": {"repo": {"type": "string"}, "feature": {"type": "string"}}, "required": ["repo", "feature"]}},
     {"name": "analyze", "description": "Turn the latest batch's findings into a fix-suggestion report that waits for human review (CP4).",
      "parameters": {"type": "object", "properties": {"repo": {"type": "string"}, "feature": {"type": "string"}}, "required": ["repo", "feature"]}},
     {"name": "check_stability", "description": "Re-judge stored transcripts of the latest batch several times to measure judge noise. Slow.",
@@ -162,6 +168,8 @@ class Agent:
         if name == "run_eval":
             runs = str(min(max(int(args.get("runs") or 3), 1), 3))
             return self._cli("run", "--repo", repo, "--feature", feature, "--runs", runs, *only)
+        if name == "compare_batches":
+            return self._cli("compare", "--repo", repo, "--feature", feature)
         if name == "analyze":
             return self._cli("analyze", "--repo", repo, "--feature", feature)
         if name == "check_stability":
@@ -178,7 +186,9 @@ class Agent:
     def run(self, goal: str) -> dict:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": goal}]
         tools = [{"type": "function", "function": t} for t in TOOLS]
-        self._log(f"# Agent session {datetime.now().isoformat(timespec='seconds')}\n\nModel: {self.model}\n\n## Goal\n\n{goal}\n")
+        prompt_hash = hashlib.sha256((SYSTEM_PROMPT + json.dumps(TOOLS)).encode()).hexdigest()[:12]
+        self._log(f"# Agent session {datetime.now().isoformat(timespec='seconds')}\n\n"
+                  f"Model: {self.model} · eval-agent {__version__} · agent prompt+tools {prompt_hash}\n\n## Goal\n\n{goal}\n")
 
         for step in range(1, self.max_steps + 1):
             final_step = step == self.max_steps

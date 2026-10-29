@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "continuous-eval-agent"
-version = "0.2.0"
+dynamic = ["version"]
 description = "Continuous evaluation agent for LLM products"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -24,3 +24,6 @@ eval-agent = "eval_agent.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["eval_agent*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "eval_agent.__version__"}

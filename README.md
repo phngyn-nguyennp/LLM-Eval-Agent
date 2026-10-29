@@ -188,6 +188,25 @@ Ví dụ cron chạy mỗi sáng ngày làm việc. Nếu repo đích không đ�
 0 9 * * 1-5  EVAL_AGENT_HOME=$HOME/.eval-agent eval-agent agent >> $HOME/.eval-agent/agent-cron.log 2>&1
 ```
 
+## Versioning
+
+Có ba thứ được gắn version. Mỗi run lưu lại version của cả ba, nên luôn truy được điểm đến từ đâu.
+
+| Gắn version cho | Ở đâu | Lệnh |
+|---|---|---|
+| **Tool** | `eval_agent/__version__`, `CHANGELOG.md`, git tag `vX.Y.Z` | `eval-agent --version` |
+| **Rubric** (theo feature) | `<repo>/eval/rubrics/<feature>/<version>.yaml`. Registry lưu trạng thái, người duyệt, thời điểm. Hash nội dung lưu cùng mỗi run | `rubric versions`, `rubric new-version`, `rubric diff` |
+| **Judge** | Hash của prompt judge và tên model, lưu cùng mỗi run | `batches` |
+
+**Ra rubric mới:**
+1. `rubric new-version --to v1.1.1` tạo bản nháp từ bản đang active.
+2. Sửa bản nháp, xem thay đổi bằng `rubric diff`.
+3. Duyệt ở CP3: `approve --version v1.1.1`.
+
+Bản cũ vẫn chấm được trong suốt thời gian này, và chỉ bị archive khi bản mới được duyệt. Baseline gắn theo version rubric, nên version mới cần baseline mới.
+
+**So sánh hai batch:** dùng `compare`, hoặc `batches` để xem danh sách. Nếu hai batch được chấm bằng rubric hoặc judge khác nhau, `compare` cảnh báo **"Not a like-for-like comparison"**. Điểm đổi lúc đó có thể do thước đo đổi, không phải do sản phẩm đổi. Agent cũng dùng `compare` và được dặn không gọi đó là regression.
+
 ## Lịch sử và baseline
 
 ```bash
@@ -304,7 +323,7 @@ Phần lõi của agent là việc của AI Engineer: đưa LLM vào một quy t
 | Từ spec ra tiêu chí đo được | `spec_parser.py`, CP1–CP3 | Tách phần AI khỏi PO spec, viết behavior kiểm tra được, soạn rubric. Người duyệt ở từng bước |
 | Thiết kế rubric theo hệ thống thật | `eval/rubrics/refyn-plan/v1.1.0.yaml` | Chỉ chấm những gì code không kiểm được. Phần code kiểm được giao cho test |
 | Thiết kế context cho judge | `adapters/refyn_plan.py` | Plan 126K ký tự rút còn 16K mà vẫn đủ thông tin để chấm |
-| Phát hiện regression và truy vết | `store.py` | Baseline theo từng hồ sơ. Hash của prompt và rubric gắn với mỗi run |
+| Phát hiện regression, truy vết, versioning | `store.py`, `compare` | Baseline theo từng hồ sơ. Version của tool, rubric và prompt judge gắn với mỗi run. Cảnh báo khi hai batch không so được với nhau |
 | Phân tích lỗi có ràng buộc | `analyze`, `eval/context/<feature>.md` | Gom lỗi thành giả thuyết nguyên nhân, neo vào kiến trúc thật để không đoán mò. Người duyệt ở CP4 |
 | Agent tool-calling có rào chắn | `agent.py` | LLM tự chọn bước. Danh sách tool cho phép, giới hạn chi phí, kiểm tham số trước khi chạy, lưu vết. Không thể vượt checkpoint |
 

@@ -103,7 +103,7 @@ class Store:
             self.conn.execute("ALTER TABLE eval_runs ADD COLUMN batch_id TEXT")
             self.conn.execute("UPDATE eval_runs SET batch_id = id WHERE batch_id IS NULL")
             self.conn.commit()
-        for col in ("judge_prompt_hash", "rubric_hash"):
+        for col in ("judge_prompt_hash", "rubric_hash", "tool_version"):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE eval_runs ADD COLUMN {col} TEXT")
         dim_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(dimension_scores)")}
@@ -124,8 +124,8 @@ class Store:
             """INSERT INTO eval_runs
             (id, created_at, repo, feature, rubric_ver, config_hash, config_name,
              model, trigger, user_level, persona, overall, verdict, auto_fail,
-             total_turns, latency_ms, judge_model, transcript, batch_id, judge_prompt_hash, rubric_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             total_turns, latency_ms, judge_model, transcript, batch_id, judge_prompt_hash, rubric_hash, tool_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 run_id,
                 result.created_at.isoformat(),
@@ -148,6 +148,7 @@ class Store:
                 batch_id or run_id,
                 result.judge_prompt_hash,
                 result.rubric_hash,
+                result.tool_version,
             ),
         )
         for dim in result.dimensions:
@@ -293,6 +294,22 @@ class Store:
             (repo, feature),
         ).fetchone()
         return row["batch_id"] if row else None
+
+    def batches(self, repo: str, feature: str, limit: int = 20) -> list[dict]:
+        """Batches newest first, with what they were judged with — the basis for comparing versions."""
+        rows = self.conn.execute(
+            """SELECT batch_id, MIN(created_at) AS created_at, COUNT(*) AS n,
+                      SUM(verdict = 'PASS') AS passed, AVG(overall) AS mean,
+                      GROUP_CONCAT(DISTINCT rubric_ver) AS rubric_ver,
+                      GROUP_CONCAT(DISTINCT rubric_hash) AS rubric_hash,
+                      GROUP_CONCAT(DISTINCT judge_prompt_hash) AS judge_prompt_hash,
+                      GROUP_CONCAT(DISTINCT judge_model) AS judge_model,
+                      GROUP_CONCAT(DISTINCT tool_version) AS tool_version
+               FROM eval_runs WHERE repo = ? AND feature = ?
+               GROUP BY batch_id ORDER BY MIN(created_at) DESC LIMIT ?""",
+            (repo, feature, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def batch_runs(self, batch_id: str) -> list[dict]:
         rows = self.conn.execute(
