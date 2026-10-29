@@ -1607,6 +1607,8 @@ def status_cmd(repo: str | None):
                     passed = sum(x["verdict"] == "PASS" for x in runs)
                     mean = sum(x["overall"] for x in runs) / len(runs)
                     last = f"{runs[0]['created_at'][:10]} {passed}/{len(runs)} PASS · mean {mean:.2f}"
+                    if runs[0]["rubric_ver"] != feat.active_version:
+                        todo.append(f"next: last batch used rubric {runs[0]['rubric_ver']}, active is {feat.active_version} → run --repo {repo_name} --feature {feat_name}")
                     if not store.batch_is_baseline(batch):
                         todo.append(f"[yellow]YOU: accept as baseline?[/yellow] → baseline set --batch {batch}")
                         waiting += 1

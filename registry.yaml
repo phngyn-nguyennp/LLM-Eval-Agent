@@ -35,13 +35,15 @@ repos:
     eval_dir: eval
     features:
       refyn-plan:
-        active_version: v1.1.0
+        active_version: v1.1.1
         adapter: refyn-plan
         versions:
           v1.1.0:
-            status: approved
+            status: archived
           v1.1.1:
+            approved_at: '2026-10-29T10:30:54'
+            approved_by: NguyenNP (via Claude Code, on user instruction)
             created_at: '2026-10-29'
-            stage: rubric_review
-            status: draft
+            stage: approved
+            status: approved
     path: /data/nguyennp/AI-Mini-Chatbot
