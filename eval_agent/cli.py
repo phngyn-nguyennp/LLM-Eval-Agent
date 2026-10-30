@@ -631,6 +631,7 @@ def eval_cmd(repo: str, feature: str, transcript: str, config_file: str | None, 
                 judge_prompt_hash=judge_prompt_hash(),
                 rubric_hash=file_hash(rubric_path),
                 tool_version=__version__,
+                input_format="transcript",
             )
             store = get_store()
             run_id = store.save_eval_run(eval_result, batch_id)
@@ -653,6 +654,16 @@ def eval_cmd(repo: str, feature: str, transcript: str, config_file: str | None, 
 
 def new_batch_id() -> str:
     return f"b-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{os.urandom(2).hex()}"
+
+
+def git_ref(path: Path) -> str:
+    """Branch and short commit of a checkout, so a run says which code it evaluated."""
+    try:
+        out = subprocess.run(["git", "-C", str(path), "log", "-1", "--format=%h %D"],
+                             capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
 
 
 def gated_rubric(reg: Registry, repo: str, feature: str, allow_draft: bool) -> tuple[Path | None, bool]:
@@ -694,8 +705,10 @@ def gated_rubric(reg: Registry, repo: str, feature: str, allow_draft: bool) -> t
 @click.option("--save/--no-save", default=True, help="Save results to store")
 @click.option("--set-baseline", is_flag=True, help="Make each saved run the baseline for its profile")
 @click.option("--allow-draft", is_flag=True, help="Try an unapproved rubric; results are not saved")
+@click.option("--repo-path", type=click.Path(exists=True, file_okay=False),
+              help="Generate from this checkout instead of the registered path (e.g. a worktree of another branch)")
 def run_cmd(repo: str, feature: str, only: tuple[str, ...], model: str, base_url: str, api_key: str,
-            runs: int, concurrency: int, save: bool, set_baseline: bool, allow_draft: bool):
+            runs: int, concurrency: int, save: bool, set_baseline: bool, allow_draft: bool, repo_path: str | None):
     """Generate outputs with the feature's adapter, then judge each one."""
     from eval_agent.judge import file_hash, judge_prompt_hash, judge_transcript
     from eval_agent.models import EvalResult, Verdict as V
@@ -714,8 +727,10 @@ def run_cmd(repo: str, feature: str, only: tuple[str, ...], model: str, base_url
 
     from eval_agent.adapters import refyn_plan as adapter
 
-    console.print(f"[dim]Generating outputs in {reg.repo_path(repo)}...[/dim]")
-    items = adapter.generate_plans(reg.repo_path(repo), list(only))
+    code_path = Path(repo_path) if repo_path else reg.repo_path(repo)
+    code_ref = git_ref(code_path)
+    console.print(f"[dim]Generating outputs in {code_path} ({code_ref or 'not a git checkout'})...[/dim]")
+    items = adapter.generate_plans(code_path, list(only))
     if not items:
         console.print(f"[red]No items to evaluate{' for --only ' + ', '.join(only) if only else ''}[/red]")
         return
@@ -793,6 +808,7 @@ def run_cmd(repo: str, feature: str, only: tuple[str, ...], model: str, base_url
                 judge_prompt_hash=judge_prompt_hash(),
                 rubric_hash=file_hash(rubric_path),
                 tool_version=__version__,
+                input_format=adapter.INPUT_FORMAT,
             )
             run_id = store.save_eval_run(eval_result, batch_id)
             regression = store.detect_regression(eval_result)
@@ -861,12 +877,12 @@ def batches_cmd(repo: str, feature: str, limit: int):
     rows = store.batches(repo, feature, limit)
     store.close()
     table = Table(title=f"Batches — {repo}/{feature}")
-    for col in ("Batch", "Date", "Items", "PASS", "Mean", "Rubric", "Rubric hash", "Judge prompt", "Judge model", "Tool"):
+    for col in ("Batch", "Date", "Items", "PASS", "Mean", "Rubric", "Rubric hash", "Judge prompt", "Judge model", "Input", "Tool"):
         table.add_column(col)
     for b in rows:
         table.add_row(b["batch_id"], b["created_at"][:16], str(b["n"]), str(b["passed"]), f"{b['mean']:.2f}",
                       b["rubric_ver"] or "-", b["rubric_hash"] or "-", b["judge_prompt_hash"] or "-",
-                      b["judge_model"] or "-", b["tool_version"] or "-")
+                      b["judge_model"] or "-", b["input_format"] or "-", b["tool_version"] or "-")
     console.print(table)
 
 
@@ -894,7 +910,8 @@ def compare_cmd(repo: str, feature: str, batch_a: str | None, batch_b: str | Non
     console.print(f"[bold]{batch_a}[/bold]  →  [bold]{batch_b}[/bold]")
     differs = []
     for key, label in (("rubric_ver", "rubric version"), ("rubric_hash", "rubric content"),
-                       ("judge_prompt_hash", "judge prompt"), ("judge_model", "judge model"), ("tool_version", "eval-agent")):
+                       ("judge_prompt_hash", "judge prompt"), ("judge_model", "judge model"), ("input_format", "judge input"),
+                       ("tool_version", "eval-agent")):
         va, vb = meta.get(batch_a, {}).get(key), meta.get(batch_b, {}).get(key)
         mark = "" if va == vb else "  [yellow]⚠ changed[/yellow]"
         console.print(f"  {label:15s} {va or '-'} → {vb or '-'}{mark}")
@@ -902,7 +919,7 @@ def compare_cmd(repo: str, feature: str, batch_a: str | None, batch_b: str | Non
             differs.append(label)
     if differs:
         console.print(f"[yellow]⚠ Not a like-for-like comparison: {', '.join(differs)} changed. "
-                      "Score changes may come from the judge or rubric, not from the product.[/yellow]")
+                      "Score changes may come from the judge, rubric or input format, not from the product.[/yellow]")
 
     # Same item = same name, or for unnamed `eval` runs the same input config
     by_a = {r["config_name"] or r["config_hash"]: r for r in runs_a}

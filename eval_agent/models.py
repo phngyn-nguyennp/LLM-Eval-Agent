@@ -78,6 +78,7 @@ class EvalResult:
     judge_prompt_hash: str = ""
     rubric_hash: str = ""
     tool_version: str = ""
+    input_format: str = ""  # how the product output was turned into the judge's transcript
 
 
 @dataclass

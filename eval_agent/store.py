@@ -53,8 +53,7 @@ CREATE TABLE IF NOT EXISTS baselines (
     created_at  TEXT NOT NULL,
     overall     REAL NOT NULL,
     run_id      TEXT REFERENCES eval_runs(id),
-    active      INTEGER DEFAULT 1,
-    UNIQUE(repo, feature, rubric_ver, config_hash, active)
+    active      INTEGER DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS reports (
@@ -103,12 +102,29 @@ class Store:
             self.conn.execute("ALTER TABLE eval_runs ADD COLUMN batch_id TEXT")
             self.conn.execute("UPDATE eval_runs SET batch_id = id WHERE batch_id IS NULL")
             self.conn.commit()
-        for col in ("judge_prompt_hash", "rubric_hash", "tool_version"):
+        for col in ("judge_prompt_hash", "rubric_hash", "tool_version", "input_format"):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE eval_runs ADD COLUMN {col} TEXT")
         dim_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(dimension_scores)")}
         if "run_scores" not in dim_cols:
             self.conn.execute("ALTER TABLE dimension_scores ADD COLUMN run_scores TEXT")
+        self.conn.commit()
+        # Only one *active* baseline per item; the old UNIQUE(..., active) also blocked a second retired one
+        table_sql = self.conn.execute("SELECT sql FROM sqlite_master WHERE name = 'baselines'").fetchone()[0]
+        if "UNIQUE" in table_sql:
+            self.conn.executescript("""
+                ALTER TABLE baselines RENAME TO baselines_old;
+                CREATE TABLE baselines (
+                    id TEXT PRIMARY KEY, repo TEXT NOT NULL, feature TEXT NOT NULL,
+                    rubric_ver TEXT NOT NULL, config_hash TEXT NOT NULL, created_at TEXT NOT NULL,
+                    overall REAL NOT NULL, run_id TEXT REFERENCES eval_runs(id), active INTEGER DEFAULT 1);
+                INSERT INTO baselines SELECT * FROM baselines_old;
+                DROP TABLE baselines_old;
+            """)
+        self.conn.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS baselines_one_active
+            ON baselines(repo, feature, rubric_ver, config_hash) WHERE active = 1"""
+        )
         self.conn.commit()
         report_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(reports)")}
         if "content_hash" not in report_cols:
@@ -124,8 +140,8 @@ class Store:
             """INSERT INTO eval_runs
             (id, created_at, repo, feature, rubric_ver, config_hash, config_name,
              model, trigger, user_level, persona, overall, verdict, auto_fail,
-             total_turns, latency_ms, judge_model, transcript, batch_id, judge_prompt_hash, rubric_hash, tool_version)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             total_turns, latency_ms, judge_model, transcript, batch_id, judge_prompt_hash, rubric_hash, tool_version, input_format)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 run_id,
                 result.created_at.isoformat(),
@@ -149,6 +165,7 @@ class Store:
                 result.judge_prompt_hash,
                 result.rubric_hash,
                 result.tool_version,
+                result.input_format,
             ),
         )
         for dim in result.dimensions:
@@ -304,7 +321,8 @@ class Store:
                       GROUP_CONCAT(DISTINCT rubric_hash) AS rubric_hash,
                       GROUP_CONCAT(DISTINCT judge_prompt_hash) AS judge_prompt_hash,
                       GROUP_CONCAT(DISTINCT judge_model) AS judge_model,
-                      GROUP_CONCAT(DISTINCT tool_version) AS tool_version
+                      GROUP_CONCAT(DISTINCT tool_version) AS tool_version,
+                      GROUP_CONCAT(DISTINCT input_format) AS input_format
                FROM eval_runs WHERE repo = ? AND feature = ?
                GROUP BY batch_id ORDER BY MIN(created_at) DESC LIMIT ?""",
             (repo, feature, limit),
