@@ -88,6 +88,7 @@ class RubricDimension:
     description: str
     source_behaviors: list[str] = field(default_factory=list)
     scoring: dict[int, str] = field(default_factory=dict)
+    computed: str | None = None  # name of a code check in eval_agent.checks; the judge does not score it
 
 
 @dataclass

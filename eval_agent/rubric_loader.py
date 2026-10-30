@@ -29,6 +29,7 @@ def load_rubric(path: str | Path) -> Rubric:
             description=d.get("description", ""),
             source_behaviors=d.get("source_behaviors", []),
             scoring=d.get("scoring", {}),
+            computed=d.get("computed"),
         ))
 
     auto_fail_rules = []
@@ -82,6 +83,8 @@ def save_rubric(rubric: Rubric, path: str | Path):
             d["source_behaviors"] = dim.source_behaviors
         if dim.scoring:
             d["scoring"] = dim.scoring
+        if dim.computed:
+            d["computed"] = dim.computed
         data["dimensions"].append(d)
 
     for af in rubric.auto_fail:

@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import statistics
+import re
 import subprocess
 import sys
 from datetime import datetime
@@ -671,6 +672,14 @@ def gated_rubric(reg: Registry, repo: str, feature: str, allow_draft: bool) -> t
     feat = reg.get_feature(repo, feature)
     version = feat.active_version
     rubric_path = reg.resolve_rubric_path(repo, feature)
+    pending = reg.pending_versions(repo, feature)
+    if allow_draft and pending:
+        # Trying the newest version under review (e.g. from `rubric new-version`) while another is active
+        newest = sorted(pending, key=lambda v: [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", v)])[-1]
+        draft_path = reg.resolve_rubric_path(repo, feature, newest).with_suffix(".draft.yaml")
+        if draft_path.exists():
+            console.print(f"[yellow]⚠ Using unapproved rubric {draft_path.name} — results will NOT be saved[/yellow]")
+            return draft_path, False
     if reg.is_approved(repo, feature):
         if not rubric_path.exists():
             console.print(f"[red]Rubric not found: {rubric_path}[/red]")
@@ -768,7 +777,7 @@ def run_cmd(repo: str, feature: str, only: tuple[str, ...], model: str, base_url
     store = get_store() if save else None
     dim_names = [d.name for r in results if r[2] and r[2].dimensions for d in r[2].dimensions]
     dim_names = list(dict.fromkeys(dim_names))
-    table = Table(title=f"{repo} / {feature} {feat.active_version}")
+    table = Table(title=f"{repo} / {feature} {rubric_path.stem.removesuffix('.draft')}")
     table.add_column("Id")
     table.add_column("Profile")
     table.add_column("Verdict")
@@ -853,7 +862,10 @@ def run_cmd(repo: str, feature: str, only: tuple[str, ...], model: str, base_url
             for miss in dim.misses[:3]:
                 console.print(f"    - {miss.get('quote', '')} → {miss.get('issue', '')}", style="dim")
 
-    if store:
+    if store and not store.batch_runs(batch_id):
+        console.print("\n[red]Nothing was saved: every item failed[/red]")
+        store.close()
+    elif store:
         console.print(f"\nBatch: {batch_id}")
         if set_baseline:
             console.print("[green]Baselines set for every saved run[/green]")

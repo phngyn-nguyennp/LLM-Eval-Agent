@@ -2,6 +2,17 @@
 
 Version của tool nằm ở `eval_agent/__version__`, kiểm bằng `eval-agent --version`. Mỗi run lưu kèm version này, nên `batches` và `compare` biết một batch được chấm bằng bản nào.
 
+## 0.5.0 — 2026-10-30
+
+- **Tiêu chí chấm bằng code.** Rubric có thể ghi `computed: <check>` cho một dimension; judge sẽ bỏ qua dimension đó và code chấm (`eval_agent/checks.py`). Điểm này giống hệt nhau qua các lần chấm, nên `stability` đọc độ nhiễu bằng 0.
+- **`refyn_part_fit`** chấm `session_part_fit` của ISI213 dựa trên nhãn role:
+  - Bài tính là sai chỗ: str/cardio nằm trong warm-up hoặc cool-down, stretch nằm trong main của buổi A/B, hoặc str/cardio xuất hiện trong buổi C.
+  - Số bài sai được quy ra điểm theo đúng các mốc của rubric.
+  - Lý do bỏ judge: mỗi plan có khoảng 500 bài, judge không đếm nổi, và cho khoảng 2 điểm cho cả plan có 7 bài sai lẫn plan có 140 bài sai.
+- `run --allow-draft` chấm bằng bản nháp mới nhất đang chờ duyệt, kể cả khi đã có một version khác đang active.
+- Khi mọi item đều lỗi, `run` không còn gợi ý đặt batch rỗng làm baseline.
+- Thêm `tests/` (pytest).
+
 ## 0.4.0 — 2026-10-30
 
 - **`run --repo-path`**: chấm code trên một checkout khác (ví dụ worktree của nhánh đang sửa) mà không đổi registry; output in branch/commit được chấm.

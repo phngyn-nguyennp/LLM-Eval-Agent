@@ -9,6 +9,7 @@ from pathlib import Path
 
 from openai import AsyncOpenAI
 
+from eval_agent.checks import compute
 from eval_agent.models import AutoFailResult, DimensionScore, JudgeResult, Rubric, Verdict
 from eval_agent.rubric_loader import load_rubric
 
@@ -244,9 +245,13 @@ async def judge_transcript(
             rubric_version=rubric.meta.version,
         )
 
+    # Dimensions the rubric hands to code are scored up front, so a missing label fails before any LLM call
+    computed = {d.name: compute(d, transcript) for d in rubric.dimensions if d.computed}
+    llm_dims = [d for d in rubric.dimensions if not d.computed]
+
     prompt = build_judge_prompt(
         transcript=transcript,
-        dimensions=rubric.dimensions,
+        dimensions=llm_dims,
         config=config,
         user_level=user_level,
     )
@@ -271,7 +276,7 @@ async def judge_transcript(
             )
             text = response.choices[0].message.content or ""
             try:
-                scores = parse_judge_response(text, rubric.dimensions)
+                scores = parse_judge_response(text, llm_dims)
             except (ValueError, json.JSONDecodeError):
                 if attempt == attempts - 1 and not scores:
                     raise
@@ -292,12 +297,19 @@ async def judge_transcript(
             dim.unverified = [b for b in bad if b.startswith(dim.name + ":")]
         return scores
 
-    outcomes = await asyncio.gather(*[judge_once() for _ in range(max(1, runs))], return_exceptions=True)
-    all_runs = [o for o in outcomes if not isinstance(o, BaseException)]
-    if not all_runs:
-        raise outcomes[0]
-    # One malformed response out of several should not lose the item; the median uses the runs that parsed
-    scores = median_scores(all_runs)
+    if llm_dims:
+        outcomes = await asyncio.gather(*[judge_once() for _ in range(max(1, runs))], return_exceptions=True)
+        all_runs = [o for o in outcomes if not isinstance(o, BaseException)]
+        if not all_runs:
+            raise outcomes[0]
+        # One malformed response out of several should not lose the item; the median uses the runs that parsed
+        judged = {s.name: s for s in median_scores(all_runs)}
+        n_runs = len(all_runs)
+    else:
+        judged, n_runs = {}, max(1, runs)
+    for s in computed.values():
+        s.run_scores = [s.score] * n_runs  # deterministic: same score every run, so stability reads it as zero noise
+    scores = [judged.get(d.name) or computed[d.name] for d in rubric.dimensions]
 
     weighted_sum = sum(s.weighted_score for s in scores)
     max_weighted = sum(10.0 * d.weight for d in rubric.dimensions)
