@@ -53,6 +53,9 @@ class JudgeResult:
     auto_fail: bool = False
     auto_fail_reasons: list[AutoFailResult] = field(default_factory=list)
     rubric_version: str = ""
+    judge_runs: int = 0  # judge runs whose scores went into the median
+    judge_runs_wanted: int = 0
+    judge_errors: list[str] = field(default_factory=list)  # failed runs, including ones that were replaced
 
 
 @dataclass

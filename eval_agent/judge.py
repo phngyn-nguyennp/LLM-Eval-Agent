@@ -297,16 +297,23 @@ async def judge_transcript(
             dim.unverified = [b for b in bad if b.startswith(dim.name + ":")]
         return scores
 
+    wanted = max(1, runs)
+    errors: list[str] = []
     if llm_dims:
-        outcomes = await asyncio.gather(*[judge_once() for _ in range(max(1, runs))], return_exceptions=True)
-        all_runs = [o for o in outcomes if not isinstance(o, BaseException)]
+        # A run that fails (no parseable JSON after its retries, API error) is replaced, so the median is over
+        # `runs` runs as asked; after more than `wanted` failures the item keeps what it has and reports the shortfall
+        all_runs: list[list[DimensionScore]] = []
+        while len(all_runs) < wanted and len(errors) <= wanted:
+            outcomes = await asyncio.gather(*[judge_once() for _ in range(wanted - len(all_runs))],
+                                            return_exceptions=True)
+            all_runs += [o for o in outcomes if not isinstance(o, BaseException)]
+            errors += [f"{type(o).__name__}: {o}"[:200] for o in outcomes if isinstance(o, BaseException)]
         if not all_runs:
-            raise outcomes[0]
-        # One malformed response out of several should not lose the item; the median uses the runs that parsed
+            raise RuntimeError(f"All judge runs failed: {'; '.join(errors)}")
         judged = {s.name: s for s in median_scores(all_runs)}
         n_runs = len(all_runs)
     else:
-        judged, n_runs = {}, max(1, runs)
+        judged, n_runs = {}, wanted
     for s in computed.values():
         s.run_scores = [s.score] * n_runs  # deterministic: same score every run, so stability reads it as zero noise
     scores = [judged.get(d.name) or computed[d.name] for d in rubric.dimensions]
@@ -321,4 +328,7 @@ async def judge_transcript(
         pass_threshold=rubric.pass_threshold,
         dimensions=scores,
         rubric_version=rubric.meta.version,
+        judge_runs=n_runs,
+        judge_runs_wanted=wanted,
+        judge_errors=errors,
     )

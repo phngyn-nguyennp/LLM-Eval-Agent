@@ -1,3 +1,3 @@
 """continuous-eval-agent: evaluate LLM features from PO specs, with human checkpoints."""
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"

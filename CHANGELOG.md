@@ -2,6 +2,13 @@
 
 Version của tool nằm ở `eval_agent/__version__`, kiểm bằng `eval-agent --version`. Mỗi run lưu kèm version này, nên `batches` và `compare` biết một batch được chấm bằng bản nào.
 
+## 0.5.1 — 2026-11-02
+
+- **Không còn âm thầm thiếu lượt chấm.** Trước đây một lượt judge hỏng (không ra JSON hợp lệ sau 3 lần thử, hoặc lỗi API) bị bỏ qua, và median chỉ lấy từ 1–2 lượt mà không báo. Ở ISI213, 3–7/15 item mỗi batch bị như vậy; PASS của `bench-09` (0.90 → 0.45 trên cùng một plan) là từ 1 lượt chấm.
+  - Lượt hỏng giờ được chấm lại cho đủ `--runs`. Quá `--runs` lượt hỏng thì giữ số lượt có được.
+  - `run` in danh sách item thiếu lượt kèm lỗi cuối cùng. `compare` có cột Runs (A/B) và cảnh báo item nào dưới 3 lượt.
+  - Prompt judge giữ nguyên (`7dee392b9fe4`), nên vẫn so được với batch cũ. Lỗi gốc ở plan dài là judge viết rationale rất dài hoặc lặp ký tự tab tới hết 8192 token; thêm giới hạn độ dài vào prompt chỉ nâng tỉ lệ parse từ 3/12 lên 5/12, không đủ để đổi prompt.
+
 ## 0.5.0 — 2026-10-30
 
 - **Tiêu chí chấm bằng code.** Rubric có thể ghi `computed: <check>` cho một dimension; judge sẽ bỏ qua dimension đó và code chấm (`eval_agent/checks.py`). Điểm này giống hệt nhau qua các lần chấm, nên `stability` đọc độ nhiễu bằng 0.

@@ -842,6 +842,14 @@ def run_cmd(repo: str, feature: str, only: tuple[str, ...], model: str, base_url
 
     console.print(table)
 
+    short = [(item["input"].get("request_id", "?"), r) for item, _, r in results
+             if r is not None and r.judge_runs < r.judge_runs_wanted]
+    if short:
+        console.print(f"[yellow]⚠ Fewer judge runs than asked on {len(short)} items (their scores are less reliable): "
+                      + ", ".join(f"{rid} {r.judge_runs}/{r.judge_runs_wanted}" for rid, r in short) + "[/yellow]")
+        for rid, r in short:
+            console.print(f"  [dim]{rid}: {r.judge_errors[-1]}[/dim]")
+
     judged = [r for _, _, r in results if r is not None]
     if judged:
         passed = sum(r.verdict == V.PASS for r in judged)
@@ -938,15 +946,23 @@ def compare_cmd(repo: str, feature: str, batch_a: str | None, batch_b: str | Non
     by_b = {r["config_name"] or r["config_hash"]: r for r in runs_b}
     common = [k for k in by_b if k in by_a]
     table = Table(title=f"{len(common)} items in both batches")
-    for col in ("Item", "Overall A", "Overall B", "Δ", "Verdict"):
+    for col in ("Item", "Overall A", "Overall B", "Δ", "Verdict", "Runs"):
         table.add_column(col, justify="right" if col.startswith(("Overall", "Δ")) else "left")
+    short = []
     for k in common:
         a, b = by_a[k], by_b[k]
         d = b["overall"] - a["overall"]
         color = "green" if d > 0.05 else "red" if d < -0.05 else "white"
+        ra, rb = judge_runs(a), judge_runs(b)
+        if min(ra, rb) < max(ra, rb, 3):
+            short.append(k)
+        runs = f"{ra}/{rb}" if ra == rb == max(ra, 3) else f"[yellow]{ra}/{rb}[/yellow]"
         table.add_row(k, f"{a['overall']:.2f}", f"{b['overall']:.2f}", f"[{color}]{d:+.2f}[/{color}]",
-                      f"{a['verdict']} → {b['verdict']}")
+                      f"{a['verdict']} → {b['verdict']}", runs)
     console.print(table)
+    if short:
+        console.print(f"[yellow]⚠ {len(short)} items had fewer than 3 judge runs in A or B "
+                      f"({', '.join(short)}): their Δ is mostly judge noise.[/yellow]")
 
     dims: dict[str, list[float]] = {}
     for k in common:
@@ -960,6 +976,12 @@ def compare_cmd(repo: str, feature: str, batch_a: str | None, batch_b: str | Non
     only_b = sorted(set(by_b) - set(by_a))
     if only_a or only_b:
         console.print(f"[dim]Only in A: {', '.join(only_a) or '-'} · only in B: {', '.join(only_b) or '-'}[/dim]")
+
+
+def judge_runs(run: dict) -> int:
+    """Judge runs behind a saved item's scores: the length of its per-run score lists (0 for old runs without them)."""
+    lengths = [len(json.loads(d["run_scores"])) for d in run["dimensions"] if d.get("run_scores")]
+    return min(lengths, default=0)
 
 
 @main.command("history")
