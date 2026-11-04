@@ -82,6 +82,17 @@ CREATE TABLE IF NOT EXISTS human_labels (
     PRIMARY KEY (run_id, dimension, labeler)
 );
 
+-- One row per CLI command, so how often each step is used is shown by log, not by word (`eval-agent ops`).
+-- Only the command path is kept, never its arguments (they can hold keys or tokens).
+CREATE TABLE IF NOT EXISTS usage_log (
+    at          TEXT NOT NULL,
+    command     TEXT NOT NULL,
+    ok          INTEGER NOT NULL,
+    duration_ms INTEGER,
+    tool_version TEXT,
+    source      TEXT NOT NULL DEFAULT 'cli'
+);
+
 CREATE INDEX IF NOT EXISTS idx_runs_repo ON eval_runs(repo, feature, created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_version ON eval_runs(repo, feature, rubric_ver, created_at);
 """
@@ -376,6 +387,37 @@ class Store:
             (repo, feature),
         ).fetchone()
         return row["n"] > 0
+
+    # ─── Usage log ───
+
+    def log_usage(self, command: str, ok: bool, duration_ms: int, tool_version: str, at: str | None = None,
+                  source: str = "cli"):
+        self.conn.execute(
+            "INSERT INTO usage_log (at, command, ok, duration_ms, tool_version, source) VALUES (?, ?, ?, ?, ?, ?)",
+            (at or datetime.utcnow().isoformat(), command, int(ok), duration_ms, tool_version, source),
+        )
+        self.conn.commit()
+
+    def usage(self, since: str) -> dict[str, dict]:
+        """Per command since `since`: uses, failures, last use."""
+        rows = self.conn.execute(
+            """SELECT command, COUNT(*) AS n, SUM(ok = 0) AS failed, MAX(at) AS last
+            FROM usage_log WHERE at >= ? GROUP BY command""", (since,)).fetchall()
+        return {r["command"]: dict(r) for r in rows}
+
+    def evidence(self, since: str) -> dict[str, dict]:
+        """Work the store itself records, per kind: count and last time, since `since`."""
+        queries = {
+            "eval_runs": "SELECT COUNT(*) AS n, MAX(created_at) AS last FROM eval_runs WHERE created_at >= ?",
+            "batches": "SELECT COUNT(DISTINCT batch_id) AS n, MAX(created_at) AS last FROM eval_runs WHERE created_at >= ?",
+            "computed_scores": """SELECT COUNT(*) AS n, MAX(r.created_at) AS last FROM dimension_scores d
+                JOIN eval_runs r ON r.id = d.run_id WHERE d.rationale LIKE 'Counted by code%' AND r.created_at >= ?""",
+            "reports": "SELECT COUNT(*) AS n, MAX(created_at) AS last FROM reports WHERE created_at >= ?",
+            "reports_sent": "SELECT COUNT(*) AS n, MAX(sent_at) AS last FROM reports WHERE sent_at >= ?",
+            "human_labels": """SELECT COUNT(*) AS n, MAX(created_at) AS last FROM human_labels
+                WHERE created_at >= ? AND labeler NOT LIKE 'claude%'""",
+        }
+        return {k: dict(self.conn.execute(q, (since,)).fetchone()) for k, q in queries.items()}
 
     # ─── Reports (CP4) ───
 

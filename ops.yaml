@@ -1,0 +1,104 @@
+# Danh mục việc lặp lại khi eval một feature LLM (mỗi lần product đổi code, prompt hoặc rubric).
+# `eval-agent ops` đọc file này, đếm log thật trong eval.db và tính % tự động hóa.
+#
+# mode:
+#   auto       — tool làm từ đầu đến cuối, người không phải động tay
+#   assisted   — AI soạn, người duyệt ở checkpoint rồi mới có hiệu lực
+#   manual     — người còn làm tay
+#   checkpoint — quyết định cố ý để người làm (A4), không tính vào %
+# commands: lệnh có trong usage_log; records: loại bản ghi kết quả trong store (xem Store.evidence)
+# replaces: việc tay trước đây đã bị bỏ hẳn
+
+tasks:
+  - id: generate-outputs
+    task: Tạo output cho bộ hồ sơ benchmark sau mỗi lần sửa code
+    mode: auto
+    how: "run (adapter gọi pipeline của repo, --repo-path cho worktree)"
+    commands: [run]
+    records: [batches]
+
+  - id: judge
+    task: Chấm từng output theo rubric
+    mode: auto
+    how: "judge: median 3 lượt, kiểm câu trích, chấm lại lượt hỏng"
+    commands: [run, eval]
+    records: [eval_runs]
+
+  - id: count-part-fit
+    task: Đếm bài xếp sai phần buổi tập (~500 bài/plan)
+    mode: auto
+    how: "checks.py refyn_part_fit (code đếm, không qua LLM)"
+    records: [computed_scores]
+    replaces: Đếm tay hoặc để judge đếm (judge cho ~2 điểm cho cả plan 7 bài sai lẫn 140 bài sai)
+
+  - id: compare
+    task: So batch mới với batch trước, kiểm có so cùng điều kiện không
+    mode: auto
+    how: "compare: cảnh báo khi rubric/prompt/model/input khác, hoặc item thiếu lượt chấm"
+    commands: [compare, batches]
+
+  - id: regression
+    task: Phát hiện regression so với baseline
+    mode: auto
+    how: "run tự so từng item với baseline đang active"
+    commands: [run]
+
+  - id: rubric-check
+    task: Kiểm rubric nháp với nhãn tham chiếu trước khi duyệt
+    mode: auto
+    how: "calibrate try"
+    commands: [calibrate try, calibrate report]
+
+  - id: judge-noise
+    task: Đo độ nhiễu của judge
+    mode: auto
+    how: "stability"
+    commands: [stability]
+
+  - id: whats-pending
+    task: Biết feature nào đang chờ người, bước tiếp theo là gì
+    mode: auto
+    how: "status"
+    commands: [status]
+
+  - id: fix-suggestions
+    task: Viết gợi ý sửa lỗi cho team product từ các item FAIL
+    mode: assisted
+    how: "analyze soạn report, CP4 report approve"
+    commands: [analyze, report approve]
+    records: [reports]
+
+  - id: rubric-from-spec
+    task: Soạn rubric từ PO spec, và version mới khi rubric cần sửa
+    mode: assisted
+    how: "spec pipeline / rubric new-version, CP1-CP3 approve"
+    commands: [spec pipeline, spec parse, spec generate, rubric new-version, rubric diff]
+
+  - id: send-report
+    task: Gửi report cho team product
+    mode: manual
+    how: "report send --discord có sẵn nhưng chưa cấu hình DISCORD_WEBHOOK_URL; đang gửi tay qua chat"
+    commands: [report send]
+    records: [reports_sent]
+
+  - id: relay-results
+    task: Báo kết quả từng lần eval cho team đang sửa (số theo item, theo tiêu chí)
+    mode: manual
+    how: "đang tổng hợp tay từ compare rồi gửi qua chat"
+
+  - id: human-labels
+    task: Người thật chấm một phần plan để kiểm lại judge
+    mode: manual
+    how: "calibrate export → chấm tay → calibrate import"
+    # only labels from people count here: the model reference labels (claude-*) are left out
+    records: [human_labels]
+
+  - id: approve-rubric
+    task: Duyệt scope, AI spec, rubric (CP1-CP3)
+    mode: checkpoint
+    commands: [approve, rubric approve]
+
+  - id: baseline
+    task: Chọn batch làm baseline
+    mode: checkpoint
+    commands: [baseline]

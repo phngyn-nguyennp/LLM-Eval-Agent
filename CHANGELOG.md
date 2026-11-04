@@ -2,6 +2,12 @@
 
 Version của tool nằm ở `eval_agent/__version__`, kiểm bằng `eval-agent --version`. Mỗi run lưu kèm version này, nên `batches` và `compare` biết một batch được chấm bằng bản nào.
 
+## 0.6.0 — 2026-11-04
+
+- **`eval-agent ops`:** danh mục việc lặp lại (`ops.yaml`), mỗi việc đếm bằng chứng từ log, và tính % tự động hóa (`checkpoint` không tính).
+- **`usage_log`:** mỗi lệnh CLI ghi tên lệnh, chạy được hay không, thời gian chạy, version. Không ghi tham số.
+- `run --target-url / --target-key`: lấy output từ server đã deploy (ví dụ dev) thay vì chạy code. Profile và nhãn lấy từ `--repo-path`.
+
 ## 0.5.1 — 2026-11-02
 
 - **Không còn âm thầm thiếu lượt chấm.** Trước đây một lượt judge hỏng (không ra JSON hợp lệ sau 3 lần thử, hoặc lỗi API) bị bỏ qua, và median chỉ lấy từ 1–2 lượt mà không báo. Ở ISI213, 3–7/15 item mỗi batch bị như vậy; PASS của `bench-09` (0.90 → 0.45 trên cùng một plan) là từ 1 lượt chấm.

@@ -219,6 +219,22 @@ eval-agent baseline show --repo mini-chatbot --feature refyn-plan
 
 Baseline tính theo `(repo, feature, rubric version, config_hash)`. Với `run`, `config_hash` là hash của hồ sơ đầu vào, nên mỗi hồ sơ có baseline riêng. Lần chấm sau tụt quá 0.10 so với baseline thì báo `REGRESSION`: `warning`, hoặc `critical` nếu tụt quá 0.20.
 
+## Việc lặp lại và log sử dụng (`ops`)
+
+```bash
+eval-agent ops [--days 30]
+```
+
+`ops.yaml` (trong thư mục làm việc) là danh mục các việc lặp lại mỗi lần eval một feature. Mỗi việc có `mode`:
+- `auto`: tool làm hết.
+- `assisted`: AI soạn, người duyệt.
+- `manual`: còn làm tay.
+- `checkpoint`: cố ý để người quyết, không tính vào %.
+
+`ops` đếm bằng chứng thật cho từng việc rồi tính % tự động hóa. Bằng chứng gồm số lần chạy lệnh (bảng `usage_log`) và kết quả đã lưu (run, batch, điểm do code đếm, report, nhãn của người). Việc ghi `auto` mà không có log nào trong khoảng thời gian đang xét sẽ bị cảnh báo.
+
+`usage_log` chỉ ghi tên lệnh, thời điểm, chạy được hay không, thời gian chạy và version. **Không ghi tham số**, vì tham số có thể chứa key hoặc token. Các lệnh chạy trước khi có log (29/10–02/11) được nạp lại một lần từ transcript Claude Code với `source = backfill:claude-transcript`, chỉ tính lệnh thật sự đã chạy. Lệnh người dùng tự gõ bằng `!` không có trong transcript, nên số này có thể thấp hơn thực tế.
+
 ## Feature đang đăng ký
 
 | Repo | Feature | Adapter | Trạng thái |
@@ -361,4 +377,3 @@ Kết quả thật trên ISI213: 15 plan, 0/15 PASS. Agent tìm ra các lỗi c�
 - Trigger theo commit (webhook). Hiện chạy theo lịch bằng cron.
 - Đọc PO spec từ AFFiNE.
 - Chế độ chấm theo đáp án (accuracy / F1) cho chức năng phân loại, trích xuất.
-- Test tự động.

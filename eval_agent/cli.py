@@ -9,10 +9,12 @@ import statistics
 import re
 import subprocess
 import sys
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import click
+import yaml
 from rich.console import Console
 from rich.table import Table
 
@@ -38,7 +40,34 @@ def get_store() -> Store:
     return Store(HOME / "eval.db")
 
 
-@click.group()
+class LoggedGroup(click.Group):
+    """Writes each command run to the store's usage log (command path only), for `eval-agent ops`."""
+
+    def invoke(self, ctx: click.Context):
+        args = [*ctx.protected_args, *ctx.args]
+        if not args or "--help" in args or args[0] not in self.commands:
+            return super().invoke(ctx)
+        cmd = self.commands.get(args[0])
+        path = args[0] if not isinstance(cmd, click.Group) or len(args) < 2 or args[1].startswith("-") \
+            else f"{args[0]} {args[1]}"
+        start, ok = time.monotonic(), False
+        try:
+            rv = super().invoke(ctx)
+            ok = True
+            return rv
+        except click.exceptions.Exit as e:
+            ok = e.exit_code == 0
+            raise
+        finally:
+            try:  # the log must never break the command it records
+                store = get_store()
+                store.log_usage(path, ok, int((time.monotonic() - start) * 1000), __version__)
+                store.close()
+            except Exception:
+                pass
+
+
+@click.group(cls=LoggedGroup)
 @click.version_option(__version__, prog_name="eval-agent")
 def main():
     """Continuous Eval Agent — evaluate LLM products from PO specs."""
@@ -716,8 +745,12 @@ def gated_rubric(reg: Registry, repo: str, feature: str, allow_draft: bool) -> t
 @click.option("--allow-draft", is_flag=True, help="Try an unapproved rubric; results are not saved")
 @click.option("--repo-path", type=click.Path(exists=True, file_okay=False),
               help="Generate from this checkout instead of the registered path (e.g. a worktree of another branch)")
+@click.option("--target-url", help="Get outputs from this deployed server (e.g. dev) instead of running the code; "
+                                   "--repo-path should then be a checkout of the deployed commit, for profiles and labels")
+@click.option("--target-key", envvar="TARGET_API_KEY", default="", help="Bearer token for --target-url")
 def run_cmd(repo: str, feature: str, only: tuple[str, ...], model: str, base_url: str, api_key: str,
-            runs: int, concurrency: int, save: bool, set_baseline: bool, allow_draft: bool, repo_path: str | None):
+            runs: int, concurrency: int, save: bool, set_baseline: bool, allow_draft: bool, repo_path: str | None,
+            target_url: str | None, target_key: str):
     """Generate outputs with the feature's adapter, then judge each one."""
     from eval_agent.judge import file_hash, judge_prompt_hash, judge_transcript
     from eval_agent.models import EvalResult, Verdict as V
@@ -738,8 +771,13 @@ def run_cmd(repo: str, feature: str, only: tuple[str, ...], model: str, base_url
 
     code_path = Path(repo_path) if repo_path else reg.repo_path(repo)
     code_ref = git_ref(code_path)
-    console.print(f"[dim]Generating outputs in {code_path} ({code_ref or 'not a git checkout'})...[/dim]")
-    items = adapter.generate_plans(code_path, list(only))
+    if target_url:
+        console.print(f"[dim]Fetching outputs from {target_url} (profiles and labels from {code_path}, "
+                      f"{code_ref or 'not a git checkout'})...[/dim]")
+        items = adapter.fetch_plans(code_path, target_url, target_key, list(only), concurrency)
+    else:
+        console.print(f"[dim]Generating outputs in {code_path} ({code_ref or 'not a git checkout'})...[/dim]")
+        items = adapter.generate_plans(code_path, list(only))
     if not items:
         console.print(f"[red]No items to evaluate{' for --only ' + ', '.join(only) if only else ''}[/red]")
         return
@@ -1684,6 +1722,51 @@ def status_cmd(repo: str | None):
     store.close()
     console.print(table)
     console.print(f"\n[bold]{waiting} item(s) waiting on you[/bold]")
+
+
+@main.command("ops")
+@click.option("--days", default=30, show_default=True, help="Window for the usage evidence")
+def ops_cmd(days: int):
+    """Repeated eval work from ops.yaml: what is automated, and the logs that show it is used."""
+    inv_path = HOME / "ops.yaml"
+    if not inv_path.exists():
+        console.print(f"[red]No task inventory at {inv_path}[/red]")
+        return
+    tasks = yaml.safe_load(inv_path.read_text())["tasks"]
+    since = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    store = get_store()
+    usage, evidence = store.usage(since), store.evidence(since)
+    store.close()
+
+    labels = {"auto": "[green]auto[/green]", "assisted": "[cyan]AI drafts, you approve[/cyan]",
+              "manual": "[red]manual[/red]", "checkpoint": "[yellow]checkpoint[/yellow]"}
+    table = Table(title=f"Repeated eval work · evidence from the last {days} days")
+    for col in ("Task", "Mode", "How", "Evidence", "Last"):
+        table.add_column(col)
+    unused = []
+    for t in tasks:
+        counts = [(c, usage[c]) for c in t.get("commands", []) if c in usage]
+        parts = [f"{c} ×{u['n']}" + (f" ({u['failed']} failed)" if u["failed"] else "") for c, u in counts]
+        lasts = [u["last"] for _, u in counts]
+        for kind in t.get("records", []):
+            e = evidence[kind]
+            if e["n"]:
+                parts.append(f"{e['n']} {kind}")
+                lasts.append(e["last"])
+        if not parts and t["mode"] in ("auto", "assisted"):
+            unused.append(t["id"])
+        table.add_row(t["task"], labels[t["mode"]], t.get("how", ""), ", ".join(parts) or "[dim]no log[/dim]",
+                      max(lasts)[:10] if lasts else "-")
+    console.print(table)
+
+    counted = [t for t in tasks if t["mode"] != "checkpoint"]  # checkpoints stay with people on purpose (A4)
+    auto = sum(t["mode"] == "auto" for t in counted)
+    assisted = sum(t["mode"] == "assisted" for t in counted)
+    console.print(f"\n[bold]{auto}/{len(counted)} automated ({auto / len(counted):.0%})[/bold] · "
+                  f"{auto + assisted}/{len(counted)} ({(auto + assisted) / len(counted):.0%}) counting AI drafts you approve · "
+                  f"{sum(t['mode'] == 'checkpoint' for t in tasks)} checkpoints kept for people, not counted")
+    if unused:
+        console.print(f"[yellow]⚠ Automated but no use logged in {days} days: {', '.join(unused)}[/yellow]")
 
 
 if __name__ == "__main__":

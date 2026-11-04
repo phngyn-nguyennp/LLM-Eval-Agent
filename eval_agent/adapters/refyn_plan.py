@@ -1,7 +1,7 @@
 """Adapter for ISI213 REFYN plan generation (AI-Mini-Chatbot, mode isi213-refyn-plan).
 
-Generates one plan per benchmark profile by calling the repo's pipeline offline,
-then turns each plan into a two-turn transcript the judge can read:
+Generates one plan per benchmark profile, either by calling the repo's pipeline offline
+or by calling a deployed server's /chat/completions (e.g. dev), then turns each plan into a two-turn transcript the judge can read:
 user = onboarding profile, assistant = title + explain lines + compact sessions.
 """
 from __future__ import annotations
@@ -73,6 +73,45 @@ def generate_plans(repo_path: str | Path, only: list[str] | None = None) -> list
         if proc.returncode != 0:
             raise RuntimeError(f"Plan generation failed:\n{proc.stderr[-2000:]}")
         items = json.loads(Path(out.name).read_text())
+    attach_labels(items, Path(repo_path) / JOINT_LOAD)
+    return items
+
+
+# Prints the benchmark profiles from <repo>/tests/refyn, so a deployed server is asked the same questions
+LIST_PROFILES_SCRIPT = """
+import json, sys
+sys.path.insert(0, "../tests/refyn")
+from profiles import PROFILES, MALE_PROFILES
+print(json.dumps(PROFILES + MALE_PROFILES))
+"""
+
+
+def fetch_plans(repo_path: str | Path, api_url: str, api_key: str, only: list[str] | None = None,
+                concurrency: int = 4) -> list[dict]:
+    """Same shape as generate_plans, but each plan comes from POST {api_url}/chat/completions."""
+    import httpx
+    from concurrent.futures import ThreadPoolExecutor
+
+    proc = subprocess.run([sys.executable, "-c", LIST_PROFILES_SCRIPT], cwd=Path(repo_path) / "src",
+                          capture_output=True, text=True, timeout=60)
+    if proc.returncode != 0:
+        raise RuntimeError(f"Could not load benchmark profiles:\n{proc.stderr[-2000:]}")
+    profiles = [p for p in json.loads(proc.stdout) if not only or p["request_id"] in only]
+
+    def fetch(profile: dict) -> dict:
+        body = {"model": "refyn-plan", "stream": False, "messages": [{"role": "user", "content": "generate plan"}],
+                "metadata": {"mode": "isi213-refyn-plan", "config": profile}}
+        try:
+            resp = httpx.post(f"{api_url.rstrip('/')}/chat/completions", json=body, timeout=120,
+                              headers={"Authorization": f"Bearer {api_key}"})
+            resp.raise_for_status()
+            plan = json.loads(resp.json()["choices"][0]["message"]["content"])
+            return {"input": profile, "output": plan}
+        except Exception as e:
+            return {"input": profile, "output": None, "error": f"{type(e).__name__}: {e}"}
+
+    with ThreadPoolExecutor(concurrency) as pool:
+        items = list(pool.map(fetch, profiles))
     attach_labels(items, Path(repo_path) / JOINT_LOAD)
     return items
 
