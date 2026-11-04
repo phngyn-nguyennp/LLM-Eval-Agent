@@ -83,8 +83,9 @@ tasks:
 
   - id: relay-results
     task: Báo kết quả từng lần eval cho team đang sửa (số theo item, theo tiêu chí)
-    mode: manual
-    how: "đang tổng hợp tay từ compare rồi gửi qua chat"
+    mode: auto
+    how: "compare --markdown soạn sẵn tin nhắn: điểm theo item và tiêu chí, item nào output không đổi, thiếu lượt chấm"
+    commands: [compare]
 
   - id: human-labels
     task: Người thật chấm một phần plan để kiểm lại judge

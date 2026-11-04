@@ -2,6 +2,11 @@
 
 Version của tool nằm ở `eval_agent/__version__`, kiểm bằng `eval-agent --version`. Mỗi run lưu kèm version này, nên `batches` và `compare` biết một batch được chấm bằng bản nào.
 
+## 0.6.1 — 2026-11-04
+
+- **`compare --markdown`:** in kết quả so sánh thành tin nhắn gửi được cho team: điểm theo item và từng tiêu chí, version, cảnh báo item có output không đổi (Δ là nhiễu judge) hoặc thiếu lượt chấm. Việc "báo kết quả từng lần eval" trong `ops.yaml` chuyển từ manual sang auto.
+- `compare` có thêm cột Output (same/changed).
+
 ## 0.6.0 — 2026-11-04
 
 - **`eval-agent ops`:** danh mục việc lặp lại (`ops.yaml`), mỗi việc đếm bằng chứng từ log, và tính % tự động hóa (`checkpoint` không tính).

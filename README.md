@@ -209,6 +209,8 @@ Bản cũ vẫn chấm được trong suốt thời gian này, và chỉ bị ar
 
 **So sánh hai batch:** dùng `compare`, hoặc `batches` để xem danh sách. Nếu hai batch được chấm bằng rubric hoặc judge khác nhau, `compare` cảnh báo **"Not a like-for-like comparison"**. Điểm đổi lúc đó có thể do thước đo đổi, không phải do sản phẩm đổi. Agent cũng dùng `compare` và được dặn không gọi đó là regression.
 
+`compare` còn đánh dấu từng item: output có đổi không (`same` nghĩa là Δ chỉ là nhiễu judge), và có đủ 3 lượt chấm không. `compare --markdown` in cùng kết quả đó thành tin nhắn Markdown để gửi cho team đang sửa, với điểm theo item và từng tiêu chí.
+
 ## Lịch sử và baseline
 
 ```bash

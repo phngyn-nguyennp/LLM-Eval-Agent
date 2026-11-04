@@ -949,7 +949,8 @@ def batches_cmd(repo: str, feature: str, limit: int):
 @click.option("--feature", required=True)
 @click.option("--a", "batch_a", help="Older batch (default: the one before --b)")
 @click.option("--b", "batch_b", help="Newer batch (default: latest)")
-def compare_cmd(repo: str, feature: str, batch_a: str | None, batch_b: str | None):
+@click.option("--markdown", is_flag=True, help="Print a Markdown summary to send to the team (scores per item and dimension)")
+def compare_cmd(repo: str, feature: str, batch_a: str | None, batch_b: str | None, markdown: bool):
     """Compare two batches item by item; warns when they were judged with different versions."""
     store = get_store()
     all_batches = store.batches(repo, feature, limit=200)
@@ -965,55 +966,102 @@ def compare_cmd(repo: str, feature: str, batch_a: str | None, batch_b: str | Non
     runs_a, runs_b = store.batch_runs(batch_a), store.batch_runs(batch_b)
     store.close()
 
-    console.print(f"[bold]{batch_a}[/bold]  →  [bold]{batch_b}[/bold]")
-    differs = []
+    versions, differs = [], []
     for key, label in (("rubric_ver", "rubric version"), ("rubric_hash", "rubric content"),
                        ("judge_prompt_hash", "judge prompt"), ("judge_model", "judge model"), ("input_format", "judge input"),
                        ("tool_version", "eval-agent")):
         va, vb = meta.get(batch_a, {}).get(key), meta.get(batch_b, {}).get(key)
-        mark = "" if va == vb else "  [yellow]⚠ changed[/yellow]"
-        console.print(f"  {label:15s} {va or '-'} → {vb or '-'}{mark}")
+        versions.append((label, va or "-", vb or "-", va != vb))
         if va != vb and key != "tool_version":
             differs.append(label)
-    if differs:
-        console.print(f"[yellow]⚠ Not a like-for-like comparison: {', '.join(differs)} changed. "
-                      "Score changes may come from the judge, rubric or input format, not from the product.[/yellow]")
 
     # Same item = same name, or for unnamed `eval` runs the same input config
     by_a = {r["config_name"] or r["config_hash"]: r for r in runs_a}
     by_b = {r["config_name"] or r["config_hash"]: r for r in runs_b}
     common = [k for k in by_b if k in by_a]
-    table = Table(title=f"{len(common)} items in both batches")
-    for col in ("Item", "Overall A", "Overall B", "Δ", "Verdict", "Runs"):
-        table.add_column(col, justify="right" if col.startswith(("Overall", "Δ")) else "left")
-    short = []
+    rows, short = [], []
     for k in common:
         a, b = by_a[k], by_b[k]
-        d = b["overall"] - a["overall"]
-        color = "green" if d > 0.05 else "red" if d < -0.05 else "white"
         ra, rb = judge_runs(a), judge_runs(b)
         if min(ra, rb) < max(ra, rb, 3):
             short.append(k)
+        sa = {d["dimension"]: d["score"] for d in a["dimensions"]}
+        rows.append({"item": k, "a": a, "b": b, "delta": b["overall"] - a["overall"], "runs": (ra, rb),
+                     "same_output": a["transcript"] == b["transcript"],
+                     "dims": {d["dimension"]: (sa.get(d["dimension"]), d["score"]) for d in b["dimensions"]}})
+    dim_names = list(rows[0]["dims"]) if rows else []
+    dim_delta = {n: [r["dims"][n][1] - r["dims"][n][0] for r in rows if r["dims"].get(n, (None,))[0] is not None]
+                 for n in dim_names}
+    only_a = sorted(set(by_a) - set(by_b))
+    only_b = sorted(set(by_b) - set(by_a))
+    same = [r["item"] for r in rows if r["same_output"]]
+
+    if markdown:
+        print(compare_markdown(repo, feature, batch_a, batch_b, versions, differs, rows, dim_names, dim_delta,
+                               short, same, only_a, only_b))
+        return
+
+    console.print(f"[bold]{batch_a}[/bold]  →  [bold]{batch_b}[/bold]")
+    for label, va, vb, changed in versions:
+        console.print(f"  {label:15s} {va} → {vb}{'  [yellow]⚠ changed[/yellow]' if changed else ''}")
+    if differs:
+        console.print(f"[yellow]⚠ Not a like-for-like comparison: {', '.join(differs)} changed. "
+                      "Score changes may come from the judge, rubric or input format, not from the product.[/yellow]")
+    table = Table(title=f"{len(common)} items in both batches")
+    for col in ("Item", "Overall A", "Overall B", "Δ", "Verdict", "Runs", "Output"):
+        table.add_column(col, justify="right" if col.startswith(("Overall", "Δ")) else "left")
+    for r in rows:
+        d, (ra, rb) = r["delta"], r["runs"]
+        color = "green" if d > 0.05 else "red" if d < -0.05 else "white"
         runs = f"{ra}/{rb}" if ra == rb == max(ra, 3) else f"[yellow]{ra}/{rb}[/yellow]"
-        table.add_row(k, f"{a['overall']:.2f}", f"{b['overall']:.2f}", f"[{color}]{d:+.2f}[/{color}]",
-                      f"{a['verdict']} → {b['verdict']}", runs)
+        table.add_row(r["item"], f"{r['a']['overall']:.2f}", f"{r['b']['overall']:.2f}", f"[{color}]{d:+.2f}[/{color}]",
+                      f"{r['a']['verdict']} → {r['b']['verdict']}", runs, "same" if r["same_output"] else "changed")
     console.print(table)
     if short:
         console.print(f"[yellow]⚠ {len(short)} items had fewer than 3 judge runs in A or B "
                       f"({', '.join(short)}): their Δ is mostly judge noise.[/yellow]")
-
-    dims: dict[str, list[float]] = {}
-    for k in common:
-        sa = {d["dimension"]: d["score"] for d in by_a[k]["dimensions"]}
-        for d in by_b[k]["dimensions"]:
-            if d["dimension"] in sa:
-                dims.setdefault(d["dimension"], []).append(d["score"] - sa[d["dimension"]])
-    for name, deltas in dims.items():
-        console.print(f"  {name:32s} mean Δ {sum(deltas) / len(deltas):+.1f}")
-    only_a = sorted(set(by_a) - set(by_b))
-    only_b = sorted(set(by_b) - set(by_a))
+    if same:
+        console.print(f"[dim]{len(same)} items have the same output in both batches: their Δ comes from the judge, "
+                      "not the product.[/dim]")
+    for name, deltas in dim_delta.items():
+        if deltas:
+            console.print(f"  {name:32s} mean Δ {sum(deltas) / len(deltas):+.1f}")
     if only_a or only_b:
         console.print(f"[dim]Only in A: {', '.join(only_a) or '-'} · only in B: {', '.join(only_b) or '-'}[/dim]")
+
+
+def compare_markdown(repo, feature, batch_a, batch_b, versions, differs, rows, dim_names, dim_delta,
+                     short, same, only_a, only_b) -> str:
+    """The compare result as a message the product team can read without the tool."""
+    def mean(rs, side):
+        return sum(r[side]["overall"] for r in rs) / len(rs) if rs else 0.0
+
+    def passed(rs, side):
+        return sum(r[side]["verdict"] == "PASS" for r in rs)
+
+    out = [f"**Eval {repo}/{feature}: `{batch_b}` vs `{batch_a}`**", ""]
+    out.append(f"Mean {mean(rows, 'a'):.3f} → {mean(rows, 'b'):.3f} · PASS {passed(rows, 'a')}/{len(rows)} → "
+               f"{passed(rows, 'b')}/{len(rows)}")
+    out.append("Versions: " + ", ".join(f"{label} {vb}" + (f" (was {va})" if changed else "")
+                                         for label, va, vb, changed in versions))
+    if differs:
+        out.append(f"⚠ Not like-for-like: {', '.join(differs)} changed, so score changes may come from the judge, "
+                   "not the product.")
+    out += ["", "| Item | Overall | Δ | Verdict | " + " | ".join(dim_names) + " | Runs | Output |",
+            "|---" * (len(dim_names) + 6) + "|"]
+    for r in rows:
+        cells = [f"{a:g}→{b:g}" if a is not None else f"{b:g}" for a, b in (r["dims"][n] for n in dim_names)]
+        out.append(f"| {r['item']} | {r['a']['overall']:.2f}→{r['b']['overall']:.2f} | {r['delta']:+.2f} | "
+                   f"{r['a']['verdict']}→{r['b']['verdict']} | " + " | ".join(cells) +
+                   f" | {r['runs'][0]}/{r['runs'][1]} | {'same' if r['same_output'] else 'changed'} |")
+    out += ["", "Mean Δ per dimension: " + ", ".join(f"{n} {sum(d) / len(d):+.1f}" for n, d in dim_delta.items() if d)]
+    if same:
+        out.append(f"Same output in both batches ({len(same)}: {', '.join(same)}): their Δ is judge noise.")
+    if short:
+        out.append(f"⚠ Fewer than 3 judge runs in A or B ({', '.join(short)}): treat their Δ as noise.")
+    if only_a or only_b:
+        out.append(f"Only in A: {', '.join(only_a) or '-'} · only in B: {', '.join(only_b) or '-'}")
+    return "\n".join(out)
 
 
 def judge_runs(run: dict) -> int:
