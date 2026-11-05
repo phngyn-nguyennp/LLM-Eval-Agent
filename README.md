@@ -317,6 +317,16 @@ Mỗi lần chạy ghi một dòng vào bảng `auto_runs`: code ref, kết qu�
 0 9 * * 1-5  EVAL_AGENT_HOME=$HOME/.eval-agent eval-agent auto --repo mini-chatbot --feature refyn-plan >> $HOME/.eval-agent/auto-cron.log 2>&1
 ```
 
+**Đang chạy cho ISI213 trên dev** (`/etc/cron.d/eval-agent`, từ 05/11/2026), lúc 9:00 giờ Việt Nam các ngày làm việc. Cron gọi `scripts/cron-auto.sh`, script này:
+1. Fetch `dev/beauty-isi213` và đưa bản checkout riêng `/data/nguyennp/eval-checkouts/ai-mini-chatbot-dev` về đầu branch.
+2. Chạy `auto --target-url http://45.78.203.38:8020`: hồ sơ và nhãn lấy từ checkout, plan lấy từ server dev.
+3. Chạy dưới tên `cron-auto` (vai trò runner). Nhờ đó log cho thấy lần nào do cron chạy, và cron không vượt được checkpoint nào.
+4. Dùng `flock` để không chạy chồng lên nhau, và `umask 077` để file sinh ra chỉ chủ đọc được.
+
+Token dev nằm trong `.env` (`TARGET_API_KEY`). Log ghi vào `agent-logs/auto-cron.log`.
+
+**Giới hạn:** server dev không có endpoint báo version, nên `auto` lấy đầu branch làm commit đang chạy trên dev. Nếu branch có commit mới mà dev chưa deploy, lần chạy đó vẫn chấm bản dev cũ nhưng ghi ref mới. Nếu sau đó deploy mà branch không có commit nào mới, lần chạy kế tiếp sẽ bỏ qua. Lúc đó chạy tay `auto --force`.
+
 **Kết quả chạy thử ngày 05/11:**
 - Thư mục làm việc tạm, chỉ chấm `bench-m2`, 1 lượt, trên dev `a0f6031`.
 - Lần 1:

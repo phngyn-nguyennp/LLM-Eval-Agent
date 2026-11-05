@@ -34,7 +34,7 @@ tasks:
   - id: watch-changes
     task: Biết khi nào product đổi code để chấm lại, và chấm lại theo mục tiêu đã đặt
     mode: auto
-    how: "auto: bỏ qua khi code không đổi, chấm, so với goal, soạn report CP4 (cron)"
+    how: "auto qua cron 9:00 T2-T6 (scripts/cron-auto.sh): bỏ qua khi code không đổi, chấm, so với goal, soạn report CP4"
     commands: [auto]
     records: [auto_runs]
     replaces: Tự nhìn git log / hỏi team đã deploy chưa rồi mới quyết định chạy run
