@@ -90,8 +90,8 @@ tasks:
 
   - id: send-report
     task: Gửi report cho team product
-    mode: manual
-    how: "report send --discord có sẵn nhưng chưa cấu hình DISCORD_WEBHOOK_URL; đang gửi tay qua chat"
+    mode: auto
+    how: "report send --discord (webhook cấu hình 05/11): chỉ gửi report đã qua CP4 và chưa sửa sau khi duyệt, che khóa trước khi gửi"
     commands: [report send]
     records: [reports_sent]
 
