@@ -82,6 +82,7 @@ class EvalResult:
     rubric_hash: str = ""
     tool_version: str = ""
     input_format: str = ""  # how the product output was turned into the judge's transcript
+    code_ref: str = ""  # branch and commit (and server, for --target-url) the output came from
 
 
 @dataclass

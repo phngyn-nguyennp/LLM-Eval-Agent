@@ -93,6 +93,28 @@ CREATE TABLE IF NOT EXISTS usage_log (
     source      TEXT NOT NULL DEFAULT 'cli'
 );
 
+-- Access decisions: refusals, grants and revocations (access.yaml holds the current state, this the history).
+CREATE TABLE IF NOT EXISTS access_log (
+    at          TEXT NOT NULL,
+    user        TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    allowed     INTEGER NOT NULL,
+    detail      TEXT
+);
+
+-- One row per `eval-agent auto` pass: what it saw, did, and whether the goal was met.
+CREATE TABLE IF NOT EXISTS auto_runs (
+    at          TEXT NOT NULL,
+    repo        TEXT NOT NULL,
+    feature     TEXT NOT NULL,
+    code_ref    TEXT,
+    outcome     TEXT NOT NULL,
+    batch_id    TEXT,
+    goal_met    INTEGER,
+    report_id   TEXT,
+    detail      TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_runs_repo ON eval_runs(repo, feature, created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_version ON eval_runs(repo, feature, rubric_ver, created_at);
 """
@@ -113,7 +135,7 @@ class Store:
             self.conn.execute("ALTER TABLE eval_runs ADD COLUMN batch_id TEXT")
             self.conn.execute("UPDATE eval_runs SET batch_id = id WHERE batch_id IS NULL")
             self.conn.commit()
-        for col in ("judge_prompt_hash", "rubric_hash", "tool_version", "input_format"):
+        for col in ("judge_prompt_hash", "rubric_hash", "tool_version", "input_format", "code_ref"):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE eval_runs ADD COLUMN {col} TEXT")
         dim_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(dimension_scores)")}
@@ -137,6 +159,10 @@ class Store:
             ON baselines(repo, feature, rubric_ver, config_hash) WHERE active = 1"""
         )
         self.conn.commit()
+        usage_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(usage_log)")}
+        if "user" not in usage_cols:
+            self.conn.execute("ALTER TABLE usage_log ADD COLUMN user TEXT")
+            self.conn.commit()
         report_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(reports)")}
         if "content_hash" not in report_cols:
             self.conn.execute("ALTER TABLE reports ADD COLUMN content_hash TEXT")
@@ -151,8 +177,9 @@ class Store:
             """INSERT INTO eval_runs
             (id, created_at, repo, feature, rubric_ver, config_hash, config_name,
              model, trigger, user_level, persona, overall, verdict, auto_fail,
-             total_turns, latency_ms, judge_model, transcript, batch_id, judge_prompt_hash, rubric_hash, tool_version, input_format)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             total_turns, latency_ms, judge_model, transcript, batch_id, judge_prompt_hash, rubric_hash, tool_version, input_format,
+             code_ref)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 run_id,
                 result.created_at.isoformat(),
@@ -177,6 +204,7 @@ class Store:
                 result.rubric_hash,
                 result.tool_version,
                 result.input_format,
+                result.code_ref,
             ),
         )
         for dim in result.dimensions:
@@ -391,12 +419,49 @@ class Store:
     # ─── Usage log ───
 
     def log_usage(self, command: str, ok: bool, duration_ms: int, tool_version: str, at: str | None = None,
-                  source: str = "cli"):
+                  source: str = "cli", user: str | None = None):
         self.conn.execute(
-            "INSERT INTO usage_log (at, command, ok, duration_ms, tool_version, source) VALUES (?, ?, ?, ?, ?, ?)",
-            (at or datetime.utcnow().isoformat(), command, int(ok), duration_ms, tool_version, source),
+            "INSERT INTO usage_log (at, command, ok, duration_ms, tool_version, source, user) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (at or datetime.utcnow().isoformat(), command, int(ok), duration_ms, tool_version, source, user),
         )
         self.conn.commit()
+
+    def log_access(self, user: str, action: str, allowed: bool, detail: str = ""):
+        self.conn.execute("INSERT INTO access_log (at, user, action, allowed, detail) VALUES (?, ?, ?, ?, ?)",
+                          (datetime.now().isoformat(timespec="seconds"), user, action, int(allowed), detail))
+        self.conn.commit()
+
+    def access_log(self, limit: int = 20) -> list[dict]:
+        rows = self.conn.execute("SELECT * FROM access_log ORDER BY at DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def decisions_by(self, user: str) -> dict[str, list[str]]:
+        """Checkpoint decisions a user signed that are still in effect, to review after revoking them."""
+        reports = [r["id"] for r in self.conn.execute(
+            "SELECT id FROM reports WHERE approved_by = ? AND status = 'approved' AND sent_at IS NULL", (user,))]
+        labels = [f"{r['n']} labels" for r in self.conn.execute(
+            "SELECT COUNT(*) AS n FROM human_labels WHERE labeler = ?", (user,)) if r["n"]]
+        return {"approved reports not sent": reports, "human labels": labels}
+
+    # ─── Auto runs ───
+
+    def batch_code_ref(self, batch_id: str) -> str:
+        row = self.conn.execute("SELECT code_ref FROM eval_runs WHERE batch_id = ? LIMIT 1", (batch_id,)).fetchone()
+        return (row["code_ref"] or "") if row else ""
+
+    def log_auto(self, repo: str, feature: str, code_ref: str, outcome: str, batch_id: str | None = None,
+                 goal_met: bool | None = None, report_id: str | None = None, detail: str = ""):
+        self.conn.execute(
+            """INSERT INTO auto_runs (at, repo, feature, code_ref, outcome, batch_id, goal_met, report_id, detail)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (datetime.now().isoformat(timespec="seconds"), repo, feature, code_ref, outcome, batch_id,
+             None if goal_met is None else int(goal_met), report_id, detail))
+        self.conn.commit()
+
+    def auto_runs(self, repo: str, feature: str, limit: int = 10) -> list[dict]:
+        rows = self.conn.execute("SELECT * FROM auto_runs WHERE repo = ? AND feature = ? ORDER BY at DESC LIMIT ?",
+                                 (repo, feature, limit)).fetchall()
+        return [dict(r) for r in rows]
 
     def usage(self, since: str) -> dict[str, dict]:
         """Per command since `since`: uses, failures, last use."""
@@ -414,6 +479,7 @@ class Store:
                 JOIN eval_runs r ON r.id = d.run_id WHERE d.rationale LIKE 'Counted by code%' AND r.created_at >= ?""",
             "reports": "SELECT COUNT(*) AS n, MAX(created_at) AS last FROM reports WHERE created_at >= ?",
             "reports_sent": "SELECT COUNT(*) AS n, MAX(sent_at) AS last FROM reports WHERE sent_at >= ?",
+            "auto_runs": "SELECT COUNT(*) AS n, MAX(at) AS last FROM auto_runs WHERE at >= ?",
             "human_labels": """SELECT COUNT(*) AS n, MAX(created_at) AS last FROM human_labels
                 WHERE created_at >= ? AND labeler NOT LIKE 'claude%'""",
         }

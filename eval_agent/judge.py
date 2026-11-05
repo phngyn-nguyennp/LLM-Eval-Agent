@@ -7,6 +7,9 @@ import re
 import statistics
 from pathlib import Path
 
+from eval_agent.access import guard_llm
+from eval_agent.redact import redact_transcript
+
 from openai import AsyncOpenAI
 
 from eval_agent.checks import compute
@@ -248,6 +251,10 @@ async def judge_transcript(
     # Dimensions the rubric hands to code are scored up front, so a missing label fails before any LLM call
     computed = {d.name: compute(d, transcript) for d in rubric.dimensions if d.computed}
     llm_dims = [d for d in rubric.dimensions if not d.computed]
+
+    # Past this point the transcript goes to the LLM: refused for a non-internal endpoint, redacted when allowed
+    if guard_llm(base_url):
+        transcript = redact_transcript(transcript)[0]
 
     prompt = build_judge_prompt(
         transcript=transcript,

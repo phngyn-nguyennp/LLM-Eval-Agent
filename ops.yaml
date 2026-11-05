@@ -31,6 +31,20 @@ tasks:
     records: [computed_scores]
     replaces: Đếm tay hoặc để judge đếm (judge cho ~2 điểm cho cả plan 7 bài sai lẫn 140 bài sai)
 
+  - id: watch-changes
+    task: Biết khi nào product đổi code để chấm lại, và chấm lại theo mục tiêu đã đặt
+    mode: auto
+    how: "auto: bỏ qua khi code không đổi, chấm, so với goal, soạn report CP4 (cron)"
+    commands: [auto]
+    records: [auto_runs]
+    replaces: Tự nhìn git log / hỏi team đã deploy chưa rồi mới quyết định chạy run
+
+  - id: security-check
+    task: Kiểm khóa bị lọt, quyền file, endpoint LLM ngoài
+    mode: auto
+    how: "security check (exit 1 khi có lỗi, chạy được trong cron)"
+    commands: [security check]
+
   - id: compare
     task: So batch mới với batch trước, kiểm có so cùng điều kiện không
     mode: auto
@@ -103,3 +117,13 @@ tasks:
     task: Chọn batch làm baseline
     mode: checkpoint
     commands: [baseline]
+
+  - id: set-goal
+    task: Đặt mục tiêu cho feature (auto chạy về phía đó)
+    mode: checkpoint
+    commands: [goal set]
+
+  - id: access
+    task: Cấp và thu hồi quyền
+    mode: checkpoint
+    commands: [access grant, access revoke]

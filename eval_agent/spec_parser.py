@@ -124,6 +124,11 @@ class AISpec:
 
 
 async def _call_llm(prompt: str, system: str = "", model: str = "gpt-4o", base_url: str | None = None, api_key: str = "not-needed") -> str:
+    from eval_agent.access import guard_llm
+    from eval_agent.redact import redact
+
+    if guard_llm(base_url):
+        prompt, system = redact(prompt)[0], redact(system)[0]
     client = AsyncOpenAI(base_url=base_url, api_key=api_key)
     messages = []
     if system:

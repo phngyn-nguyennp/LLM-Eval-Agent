@@ -85,6 +85,11 @@ class Agent:
     def __init__(self, home: Path, model: str, base_url: str | None, api_key: str, max_steps: int = 12, echo=print):
         self.home = home
         self.model = model
+        from eval_agent.access import guard_llm
+
+        if guard_llm(base_url):  # tool results carry plans and transcripts: keep the agent on internal endpoints
+            from eval_agent.access import ExternalEndpointRefused
+            raise ExternalEndpointRefused("agent mode only runs on an internal LLM endpoint (internal_hosts in access.yaml)")
         self.client = OpenAI(base_url=base_url, api_key=api_key)
         self.max_steps = max_steps
         self.echo = echo

@@ -90,6 +90,106 @@ Biến đã đặt trong shell được ưu tiên hơn giá trị trong file. M�
 | `DISCORD_WEBHOOK_URL` | Tuỳ chọn: đích của `report send --discord` |
 | `EVAL_AGENT_USER` | Tuỳ chọn: tên người duyệt mặc định |
 
+## Dữ liệu và bảo mật
+
+### Dữ liệu tool chạm tới
+
+| Loại | Ví dụ | Nằm ở đâu | Mức độ |
+|---|---|---|---|
+| Khóa và token | `LLM_API_KEY`, `JUDGE_API_KEY`, `TARGET_API_KEY` (token API dev), `DISCORD_WEBHOOK_URL` | Biến môi trường, hoặc `.env` trong thư mục làm việc. Không ghi trong code, `.env` không lên git | **Bí mật**: không ra khỏi máy, không dán vào chat |
+| Input benchmark | 15 hồ sơ `bench-*` của ISI213: nhóm tuổi, giới tính, mục tiêu, kinh nghiệm, vùng đau | `AI-Mini-Chatbot/tests/refyn/profiles.py` | **Tổng hợp**: tự đặt ra, không phải người dùng thật, không có tên/email/số điện thoại |
+| Output sản phẩm | Plan sinh ra từ pipeline hoặc API dev | Bảng `eval_runs` trong `eval.db` (transcript đầy đủ) | **Nội bộ**: sinh từ input tổng hợp |
+| Quy tắc | PO spec, AI spec, rubric | `registry.yaml`, `<repo>/eval/rubrics/<feature>/` | **Nội bộ** |
+| Kết quả chấm | Điểm, rationale, câu trích, report | `eval.db`, `reports/` | **Nội bộ** |
+| Nhãn đối chiếu | Phiếu chấm tay, nhãn người và nhãn model | `calibration/`, bảng `human_labels` | **Nội bộ**, có tên người chấm |
+| Log sử dụng | Người chạy, tên lệnh, thành công hay không, thời gian, version | Bảng `usage_log` | **Nội bộ**: cố ý không lưu tham số, vì tham số có thể chứa token |
+| Quyền và nhật ký quyền | Ai có vai trò gì, ai bị thu hồi, các lần bị từ chối | `access.yaml`, bảng `access_log` | **Nội bộ** |
+
+`eval.db`, `.env`, `access.yaml`, `goals.yaml`, `reports/`, `calibration/` và `agent-logs/` đều nằm trong `.gitignore`, và chỉ chủ thư mục đọc được (mode 600/700, `security check` kiểm).
+
+### Dữ liệu nào được đi đâu
+
+| Đích | Gửi gì | Ghi chú |
+|---|---|---|
+| Endpoint LLM nằm trong `internal_hosts` (hiện là `Apero-LLM` trên máy chủ của công ty) | Rubric, transcript, plan, nguyên văn | Judge, `spec`, `analyze` và chế độ agent đều gọi endpoint này |
+| Endpoint LLM **ngoài** `internal_hosts` | Mặc định **bị từ chối**. Chỉ khi `allow_external_llm: true` mới gửi, và gửi bản **đã che** | Chế độ agent không bao giờ chạy trên endpoint ngoài |
+| API dev của sản phẩm (`run --target-url`) | Hồ sơ benchmark | Nhận lại plan |
+| Discord (`report send --discord`) | Report đã duyệt ở CP4, **đã che** trước khi gửi | Chỉ gửi sau khi người duyệt, report lưu kèm hash nội dung |
+| Người chấm tay (`calibrate export`) | Phiếu chấm, **đã che** ngay lúc xuất | Phiếu có thể được đưa cho người khác hoặc cho một model khác |
+| Claude (Anthropic), qua Claude Code | Code, plan và phiếu chấm mà session đọc; nhãn tham chiếu `claude-opus-blind` | **Công cụ ngoài**, không đi qua tool nên tool không che được. Chấp nhận được vì toàn bộ input là dữ liệu tổng hợp |
+
+**Bước che (`eval_agent/redact.py`)** thay bằng `[REDACTED:<loại>]`:
+- giá trị thật của các khóa đang nạp (`LLM_API_KEY`, `JUDGE_API_KEY`, `AGENT_API_KEY`, `TARGET_API_KEY`, `DISCORD_WEBHOOK_URL`)
+- Bearer token, webhook Discord, JWT, khóa dạng `sk-…`/`ghp_…`/`AKIA…`, cặp `api_key=…`/`token=…`
+- email và số điện thoại Việt Nam
+
+Đã chạy thử trên toàn bộ 238 plan và rationale trong `eval.db`: không che nhầm chỗ nào.
+
+### Quy tắc
+
+1. Chỉ eval trên hồ sơ tổng hợp. **Không** đưa hồ sơ hay log của người dùng thật vào một session Claude. Bước che chỉ bắt được khóa, email và số điện thoại. Tên người, địa chỉ hay bệnh sử viết tự do thì không bắt được, nên dữ liệu thật phải được ẩn danh từ nguồn trước khi đưa vào tool.
+2. Token chỉ truyền qua biến môi trường. Không truyền token làm tham số trong lệnh được lưu lại, và không ghi token vào code, rubric hay report.
+3. Report chỉ ra ngoài (Discord) sau khi qua CP4.
+4. Nhãn của model luôn lưu dưới tên `claude-*`, tách khỏi nhãn người, và không được tính là nhãn người.
+
+### Phân quyền (`access`)
+
+`access.yaml` ghi ai có vai trò gì. Mỗi lệnh được kiểm **trước khi chạy**; lần bị từ chối được ghi vào `access_log`.
+
+| Vai trò | Được làm |
+|---|---|
+| `viewer` | Chỉ xem: `status`, `ops`, `batches`, `compare`, `history`, `report show`, `goal show`, `security check`, ... |
+| `runner` | Thêm: `run`, `eval`, `auto`, `analyze`, `stability`, `calibrate export/try`, `agent`, soạn rubric |
+| `reviewer` | Thêm các checkpoint: `approve`, `rubric approve`, `baseline set`, `report approve/send`, `calibrate import`, `goal set` |
+| `owner` | Thêm: `access grant/revoke`, `registry add-*`, `security check --fix` |
+
+```bash
+eval-agent access init                         # tạo access.yaml, người chạy là owner
+eval-agent access grant <user> reviewer
+eval-agent access revoke <user> --reason "nghỉ việc"
+eval-agent access list                         # vai trò, người đã bị thu hồi, 10 quyết định gần nhất
+```
+
+- **Người ký quyết định phải là người chạy lệnh.** `approve`, `rubric approve` và `report approve` từ chối `--by` khác với người đang chạy.
+- **Thu hồi quyền:**
+  - Người bị thu hồi chạy lệnh nào cũng bị từ chối và ghi log, kể cả lệnh chỉ xem.
+  - Tool liệt kê các quyết định của họ còn hiệu lực (report đã duyệt mà chưa gửi, nhãn chấm) để người khác xem lại.
+  - Tool nhắc đổi các khóa họ từng có. Tool không tự thu hồi khóa ở hệ thống khác được.
+- **Danh tính** là tên dùng để ký checkpoint (`EVAL_AGENT_USER`, `git user.name`, hoặc user hệ điều hành), do người chạy tự khai. Vì vậy vai trò chặn được nhầm lẫn và để lại dấu vết, nhưng không chặn được người cố tình giả tên. Ranh giới cứng trên máy dùng chung là quyền file: chỉ chủ thư mục đọc được `.env`, `eval.db` và `access.yaml`.
+
+### Kiểm tra (`security check`)
+
+```bash
+eval-agent security check          # exit 1 nếu còn mục fail; chạy được trong cron/CI
+eval-agent security check --fix    # siết quyền file về owner-only (vai trò owner)
+```
+
+Lệnh kiểm:
+- có `access.yaml` chưa, và có ai được cấp lại quyền sau khi đã bị thu hồi không
+- quyền file và thư mục riêng
+- file riêng có bị git theo dõi không
+- endpoint LLM có nằm trong `internal_hosts` không
+- khóa có lọt vào code đang track, vào report, phiếu chấm, log agent, hay vào rubric/spec trong repo sản phẩm không
+
+### Lần siết quyền ngày 05/11/2026
+
+`security check` chạy lần đầu trên thư mục làm việc thật báo 8 mục fail:
+- Không có `access.yaml`, nên ai chạy được tool cũng chạy được mọi checkpoint.
+- `.env` (chứa khóa LLM và token dev), `eval.db`, `registry.yaml`, cùng 31 file trong `reports/`, `calibration/` và `agent-logs/` đều để mode 644/755, tức ai đăng nhập được máy chủ cũng đọc được.
+- Mẫu tìm khóa báo nhầm `api_key=api_key` trong code. Mẫu đã được sửa để chỉ bắt giá trị có chữ số.
+
+Đã xử lý:
+- Tạo `access.yaml`, owner `phngyn-nguyennp`.
+- `security check --fix` đưa mọi file và thư mục đó về owner-only. Lần siết được ghi trong `access_log`.
+- Kiểm lại thì không còn mục nào fail.
+
+Trước đó (02/11) cũng đã siết một lần ở `usage_log`: log được thiết kế để không lưu tham số lệnh, vì `--target-key` và `--api-key` chứa token. 87 dòng log cũ nạp lại từ transcript cũng chỉ giữ tên lệnh.
+
+### Chưa có
+
+- **Đăng nhập thật:** danh tính do người chạy tự khai (xem trên). Muốn chặn cứng thì phải chạy tool dưới một user hệ điều hành riêng, hoặc đưa lên một service có đăng nhập.
+- **Ẩn danh dữ liệu tự do:** bước che không nhận ra tên người hay bệnh sử viết thành câu.
+
 ## Thêm một tính năng mới
 
 ```bash
@@ -187,6 +287,44 @@ Ví dụ cron chạy mỗi sáng ngày làm việc. Nếu repo đích không đ�
 ```cron
 0 9 * * 1-5  EVAL_AGENT_HOME=$HOME/.eval-agent eval-agent agent >> $HOME/.eval-agent/agent-cron.log 2>&1
 ```
+
+## Chạy theo mục tiêu (`goal`, `auto`)
+
+Người đặt mục tiêu cho một feature (đây là một checkpoint, cần vai trò `reviewer`). Sau đó `auto` tự chạy về phía mục tiêu đó. Khác với chế độ agent, `auto` **không dùng LLM để quyết định bước nào**: các bước cố định, nên chạy theo lịch an toàn và kết quả lặp lại được.
+
+```bash
+eval-agent goal set --repo mini-chatbot --feature refyn-plan \
+  --min-pass-rate 1.0 --min-mean 0.75 --max-regressions 0 --min-judge-runs 3 --note "đủ để release"
+eval-agent auto --repo mini-chatbot --feature refyn-plan             # chạy trong cron
+eval-agent goal show --repo mini-chatbot --feature refyn-plan        # mục tiêu và các lần auto gần nhất
+```
+
+Mỗi lần chạy, `auto` làm theo thứ tự:
+1. **Bỏ qua nếu code không đổi.** So branch và commit của checkout (và server, khi dùng `--target-url`) với batch gần nhất. Nếu giống nhau thì dừng, không tốn lượt chấm. Thêm `--force` để chạy lại dù code không đổi.
+2. **Chấm cả bộ** như `run`, bằng rubric đã duyệt. Rubric chưa duyệt thì dừng.
+3. **So với mục tiêu:**
+   - tỉ lệ PASS
+   - điểm trung bình
+   - số item tụt dưới baseline quá 0.10
+   - số item bị chấm thiếu lượt
+4. **Ghi tin nhắn cho team** (`compare --markdown`) vào `reports/<…>-compare.md`.
+5. **Nếu chưa đạt mục tiêu**, soạn report gợi ý sửa (`analyze`) và để chờ ở CP4.
+6. **In ra những gì đang chờ người.** Nếu đạt mục tiêu, đó là lệnh đặt baseline; nếu chưa đạt, đó là report cần duyệt. `auto` **không bao giờ** tự đặt baseline, tự duyệt hay tự gửi.
+
+Mỗi lần chạy ghi một dòng vào bảng `auto_runs`: code ref, kết quả (`unchanged` / `evaluated` / `run-failed` / `no-goal`), batch, đạt mục tiêu hay chưa, report nào đang chờ.
+
+```cron
+0 9 * * 1-5  EVAL_AGENT_HOME=$HOME/.eval-agent eval-agent auto --repo mini-chatbot --feature refyn-plan >> $HOME/.eval-agent/auto-cron.log 2>&1
+```
+
+**Kết quả chạy thử ngày 05/11:**
+- Thư mục làm việc tạm, chỉ chấm `bench-m2`, 1 lượt, trên dev `a0f6031`.
+- Lần 1:
+  - Tự chấm: PASS, điểm 0.81.
+  - Tự so với batch `3b23`: output giống hệt, nên tool ghi chênh điểm là do judge dao động.
+  - Báo **chưa đạt** mục tiêu, vì item chỉ được chấm 1 lượt trong khi mục tiêu đòi 3.
+  - Tự soạn report và để chờ ở CP4.
+- Lần 2: code không đổi, nên tự bỏ qua.
 
 ## Versioning
 
@@ -372,10 +510,14 @@ Kết quả thật trên ISI213: 15 plan, 0/15 PASS. Agent tìm ra các lỗi c�
 | Adapter | `eval_agent/adapters/` | Sinh output của sản phẩm và chuyển thành transcript |
 | Store | `eval_agent/store.py` | SQLite: run, batch, baseline, regression, report, nhãn người chấm |
 | Agent | `eval_agent/agent.py` | Vòng lặp tool-calling, danh sách tool cho phép, giới hạn chi phí, nhật ký phiên |
+| Phân quyền | `eval_agent/access.py` | Vai trò, kiểm quyền từng lệnh, thu hồi, chặn endpoint LLM ngoài |
+| Che dữ liệu | `eval_agent/redact.py` | Che khóa, token, email, số điện thoại trước khi dữ liệu ra ngoài |
+| Kiểm tra bảo mật | `eval_agent/security.py` | `security check`: quyền file, git, endpoint, khóa bị lọt |
+| Mục tiêu | `eval_agent/goals.py` | Mục tiêu theo feature và cách `auto` so batch với mục tiêu |
 
 ## Chưa có
 
 - Adapter cho chatbot (`chatbot-sim`) và lesson (`lesson-eval`): hiện phải tự đưa transcript cho `eval`.
-- Trigger theo commit (webhook). Hiện chạy theo lịch bằng cron.
+- Trigger theo commit (webhook). Hiện `auto` chạy theo lịch bằng cron và tự bỏ qua khi code không đổi.
 - Đọc PO spec từ AFFiNE.
 - Chế độ chấm theo đáp án (accuracy / F1) cho chức năng phân loại, trích xuất.

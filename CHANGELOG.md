@@ -2,6 +2,15 @@
 
 Version của tool nằm ở `eval_agent/__version__`, kiểm bằng `eval-agent --version`. Mỗi run lưu kèm version này, nên `batches` và `compare` biết một batch được chấm bằng bản nào.
 
+## 0.7.0 — 2026-11-05
+
+- **Phân quyền (`access`):** `access.yaml` gán vai trò viewer / runner / reviewer / owner. Mỗi lệnh được kiểm quyền trước khi chạy; checkpoint cần reviewer. `--by` phải là người đang chạy lệnh. `access revoke` chặn ngay người bị thu hồi và liệt kê quyết định của họ còn hiệu lực. Lần từ chối, cấp và thu hồi quyền được ghi vào bảng `access_log`; `usage_log` ghi thêm người chạy.
+- **Che dữ liệu (`redact.py`):** che khóa, token, webhook, email, số điện thoại trước khi gửi Discord, khi xuất phiếu chấm, và trước khi gửi tới một endpoint LLM ngoài.
+- **Chặn endpoint LLM ngoài:** endpoint không nằm trong `internal_hosts` bị từ chối, trừ khi đặt `allow_external_llm: true`. Chế độ agent chỉ chạy trên endpoint nội bộ.
+- **`security check [--fix]`:** kiểm quyền file, git, endpoint, và khóa bị lọt. `--fix` siết quyền về owner-only. Lần chạy đầu trên thư mục thật ra 8 mục fail, đã sửa hết (xem README, mục "Lần siết quyền ngày 05/11/2026").
+- **`goal` và `auto`:** người đặt mục tiêu cho feature, `auto` tự làm các bước: bỏ qua khi code không đổi, chấm, so với mục tiêu, ghi tin nhắn cho team, soạn report CP4. Lệnh không bao giờ tự vượt checkpoint, và mỗi lần chạy ghi vào bảng `auto_runs`.
+- Mỗi run lưu `code_ref` (branch và commit, cộng server khi dùng `--target-url`).
+
 ## 0.6.1 — 2026-11-04
 
 - **`compare --markdown`:** in kết quả so sánh thành tin nhắn gửi được cho team: điểm theo item và từng tiêu chí, version, cảnh báo item có output không đổi (Δ là nhiễu judge) hoặc thiếu lượt chấm. Việc "báo kết quả từng lần eval" trong `ops.yaml` chuyển từ manual sang auto.

@@ -7,3 +7,5 @@ build/
 reports/
 calibration/
 agent-logs/
+access.yaml
+goals.yaml

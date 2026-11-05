@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import getpass
 import hashlib
 import json
 import os
@@ -19,6 +18,7 @@ from rich.console import Console
 from rich.table import Table
 
 from eval_agent import __version__
+from eval_agent.access import LLM_COMMANDS, Access, current_user, flag_value, guard_llm, ExternalEndpointRefused
 from eval_agent.home import get_home, init_home, load_env
 from eval_agent.models import Stage, Status
 from eval_agent.registry import Registry
@@ -51,7 +51,9 @@ class LoggedGroup(click.Group):
         path = args[0] if not isinstance(cmd, click.Group) or len(args) < 2 or args[1].startswith("-") \
             else f"{args[0]} {args[1]}"
         start, ok = time.monotonic(), False
+        user = current_user()
         try:
+            self.enforce(user, path, args[1:])
             rv = super().invoke(ctx)
             ok = True
             return rv
@@ -61,10 +63,34 @@ class LoggedGroup(click.Group):
         finally:
             try:  # the log must never break the command it records
                 store = get_store()
-                store.log_usage(path, ok, int((time.monotonic() - start) * 1000), __version__)
+                store.log_usage(path, ok, int((time.monotonic() - start) * 1000), __version__, user=user)
                 store.close()
             except Exception:
                 pass
+
+    @staticmethod
+    def enforce(user: str, path: str, args: list[str]):
+        """Refuse a command the user's role does not allow, or one that would send data to a non-internal LLM."""
+        access = Access(HOME)
+        allowed, reason = access.check(user, path, args)
+        if allowed and access.enabled and path in LLM_COMMANDS:
+            env = ("AGENT_BASE_URL", "LLM_BASE_URL") if path in ("agent",) else \
+                  ("LLM_BASE_URL",) if path.startswith("spec") or path == "approve" else ("JUDGE_BASE_URL", "LLM_BASE_URL")
+            url = flag_value(args, "--base-url") or next((os.environ[k] for k in env if os.environ.get(k)), None)
+            try:
+                guard_llm(url)
+            except ExternalEndpointRefused as e:
+                allowed, reason = False, str(e)
+        if allowed:
+            return
+        try:
+            store = get_store()
+            store.log_access(user, path, False, reason)
+            store.close()
+        except Exception:
+            pass
+        console.print(f"[red]⛔ {reason}[/red]")
+        raise click.exceptions.Exit(1)
 
 
 @click.group(cls=LoggedGroup)
@@ -291,12 +317,7 @@ def print_checkpoint(n: int, title: str, path: Path, repo: str, feature: str, ve
 
 
 def reviewer_name(by: str | None) -> str:
-    if by:
-        return by
-    if os.environ.get("EVAL_AGENT_USER"):
-        return os.environ["EVAL_AGENT_USER"]
-    git = subprocess.run(["git", "config", "user.name"], capture_output=True, text=True)
-    return git.stdout.strip() or getpass.getuser()
+    return by or current_user()
 
 
 def stamp_rubric(path: Path, by: str, at: str):
@@ -856,6 +877,7 @@ def run_cmd(repo: str, feature: str, only: tuple[str, ...], model: str, base_url
                 rubric_hash=file_hash(rubric_path),
                 tool_version=__version__,
                 input_format=adapter.INPUT_FORMAT,
+                code_ref=(f"{target_url} " if target_url else "") + code_ref,
             )
             run_id = store.save_eval_run(eval_result, batch_id)
             regression = store.detect_regression(eval_result)
@@ -1237,6 +1259,9 @@ def analyze_cmd(repo: str, feature: str, batch: str | None, max_score: float, co
 
     if evidence:
         console.print(f"Analysing {len(runs)} runs from batch {batch}...")
+        if guard_llm(base_url):
+            from eval_agent.redact import redact
+            evidence = [redact(line)[0] for line in evidence]
         client = OpenAI(base_url=base_url, api_key=api_key)
         response = client.chat.completions.create(
             model=model,
@@ -1363,7 +1388,12 @@ def report_send(report_id: str, to_discord: bool):
     if not webhook:
         console.print("[red]DISCORD_WEBHOOK_URL is not set (add it to .env)[/red]")
         return
-    for chunk in discord_chunks(text):
+    from eval_agent.redact import redact, summary
+
+    outgoing, found = redact(text)
+    if found:
+        console.print(f"[yellow]Redacted before sending: {summary(found)}[/yellow]")
+    for chunk in discord_chunks(outgoing):
         httpx.post(webhook, json={"content": chunk}, timeout=30).raise_for_status()
     store.mark_report_sent(report_id, "discord")
     store.close()
@@ -1406,7 +1436,19 @@ def calibrate_export(repo: str, feature: str, batch: str | None, only: tuple[str
     rubric_path = get_registry().resolve_rubric_path(repo, feature, runs[0]["rubric_ver"])
     out_dir = HOME / "calibration" / f"{repo}-{feature}-{batch}"
     sheet = export_sheet(out_dir, runs, rubric_path)
-    console.print(f"[green]Sheet for {len(runs)} items written to {out_dir}[/green]")
+    from collections import Counter
+
+    from eval_agent.redact import redact, summary
+
+    # The sheet goes to people outside the tool (and sometimes to another model): mask secrets and personal data
+    total: Counter = Counter()
+    for f in out_dir.rglob("*"):
+        if f.is_file() and f.suffix in (".md", ".csv", ".json", ".txt"):
+            text, found = redact(f.read_text())
+            if found:
+                f.write_text(text)
+                total += found
+    console.print(f"[green]Sheet for {len(runs)} items written to {out_dir}[/green] [dim](redacted: {summary(total)})[/dim]")
     console.print("\n[bold yellow]⏸  Your part — label by hand (blind to the judge)[/bold yellow]")
     console.print(f"  Read {out_dir / 'GUIDE.md'} and the files in {out_dir / 'items'}")
     console.print(f"  Fill human_score (0-10) in {sheet}; 10-15 items is enough to start")
@@ -1815,6 +1857,290 @@ def ops_cmd(days: int):
                   f"{sum(t['mode'] == 'checkpoint' for t in tasks)} checkpoints kept for people, not counted")
     if unused:
         console.print(f"[yellow]⚠ Automated but no use logged in {days} days: {', '.join(unused)}[/yellow]")
+
+
+# ─── Access control and data security (A8) ───
+
+
+@main.group()
+def access():
+    """Who may run what: roles in access.yaml, grants and revocations with an audit log."""
+    pass
+
+
+@access.command("init")
+def access_init():
+    """Create access.yaml with you as owner and the configured LLM hosts as internal."""
+    from urllib.parse import urlparse
+
+    from eval_agent.access import configured_llm_urls
+
+    a = Access(HOME)
+    if a.enabled:
+        console.print(f"[red]{a.path} already exists (owner {a.owner})[/red]")
+        return
+    hosts = sorted({"localhost", "127.0.0.1", *(urlparse(u).hostname for u in configured_llm_urls() if urlparse(u).hostname)})
+    owner = current_user()
+    a = Access.create(HOME, owner, hosts)
+    store = get_store()
+    store.log_access(owner, "access init", True, f"owner {owner}; internal hosts {', '.join(hosts)}")
+    store.close()
+    console.print(f"[green]{a.path} created (owner only, mode 600): owner {owner}[/green]")
+    console.print(f"  Internal LLM hosts: {', '.join(hosts)}")
+    console.print("[bold yellow]  Check these hosts really are inside the company; edit internal_hosts if not.[/bold yellow]")
+
+
+@access.command("list")
+def access_list():
+    """Users, roles, revocations and the latest access decisions."""
+    a = Access(HOME)
+    if not a.enabled:
+        console.print("[yellow]No access.yaml: every command is open (create it with `eval-agent access init`)[/yellow]")
+        return
+    table = Table(title=f"Access — owner {a.owner}")
+    for col in ("User", "Role", "Since", "Granted by"):
+        table.add_column(col)
+    for user, entry in a.users.items():
+        table.add_row(user, entry.get("role", ""), str(entry.get("since", "")), entry.get("granted_by", ""))
+    for r in a.revoked:
+        table.add_row(f"[dim]{r['user']}[/dim]", f"[red]revoked[/red] (was {r.get('role')})", str(r.get("at", "")),
+                      f"by {r.get('by', '')}: {r.get('reason', '')}")
+    console.print(table)
+    console.print(f"Internal LLM hosts: {', '.join(a.internal_hosts) or '-'} · external LLM "
+                  f"{'allowed (redacted)' if a.allow_external_llm else 'refused'}")
+    store = get_store()
+    log = store.access_log(10)
+    store.close()
+    if log:
+        console.print("\n[bold]Latest access decisions[/bold]")
+        for e in log:
+            mark = "[green]allowed[/green]" if e["allowed"] else "[red]refused[/red]"
+            console.print(f"  {e['at']}  {e['user']:20s} {e['action']:18s} {mark}  [dim]{e['detail'] or ''}[/dim]")
+
+
+@access.command("grant")
+@click.argument("user")
+@click.argument("role", type=click.Choice(["viewer", "runner", "reviewer", "owner"]))
+def access_grant(user: str, role: str):
+    """Give USER a role (owner only)."""
+    a = Access(HOME)
+    if not a.enabled:
+        console.print("[red]No access.yaml — run `eval-agent access init` first[/red]")
+        return
+    a.grant(user, role, by=current_user())
+    store = get_store()
+    store.log_access(current_user(), "access grant", True, f"{user} → {role}")
+    store.close()
+    console.print(f"[green]{user} is now {role}[/green]")
+
+
+@access.command("revoke")
+@click.argument("user")
+@click.option("--reason", required=True, help="Why, e.g. left the team, changed role, key leaked")
+def access_revoke(user: str, reason: str):
+    """Take away USER's access (owner only); lists their decisions still in effect, for review."""
+    a = Access(HOME)
+    try:
+        a.revoke(user, by=current_user(), reason=reason)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        return
+    store = get_store()
+    store.log_access(current_user(), "access revoke", True, f"{user}: {reason}")
+    left = store.decisions_by(user)
+    store.close()
+    console.print(f"[green]Access for {user} revoked. Every command they run from now on is refused and logged.[/green]")
+    pending = {k: v for k, v in left.items() if v}
+    if pending:
+        console.print("[yellow]Their decisions still in effect — review them:[/yellow]")
+        for k, v in pending.items():
+            console.print(f"  {k}: {', '.join(v)}")
+    console.print("[dim]Also rotate any key they had (LLM_API_KEY, TARGET_API_KEY, DISCORD_WEBHOOK_URL) — "
+                  "the tool cannot revoke those for you.[/dim]")
+
+
+@main.group()
+def security():
+    """Check what is exposed: access, file permissions, git, LLM endpoints, secrets."""
+    pass
+
+
+@security.command("check")
+@click.option("--fix", is_flag=True, help="Tighten file permissions to owner-only (owner role)")
+def security_check(fix: bool):
+    """Run the security checks; exits 1 while anything is failing."""
+    from eval_agent.security import run_checks
+
+    reg = get_registry()
+    eval_dirs = [reg.repo_path(name) / repo.eval_dir for name, repo in reg.repos.items()]
+    findings = run_checks(HOME, eval_dirs, fix=fix)
+    table = Table(title=f"Security check — {HOME}")
+    for col in ("Check", "Result", "Detail"):
+        table.add_column(col)
+    colors = {"ok": "green", "warn": "yellow", "fail": "red"}
+    for f in findings:
+        level = "fixed" if f.fixed else f.level
+        color = "green" if f.fixed else colors[f.level]
+        table.add_row(f.check, f"[{color}]{level}[/{color}]", f.detail)
+    console.print(table)
+    if fix:
+        fixed = [f.detail for f in findings if f.fixed]
+        store = get_store()
+        store.log_access(current_user(), "security fix", True, "; ".join(fixed) or "nothing to fix")
+        store.close()
+    failing = [f for f in findings if f.level == "fail" and not f.fixed]
+    if failing:
+        console.print(f"[red]{len(failing)} failing[/red]" + ("" if fix else " — `security check --fix` tightens permissions"))
+        raise click.exceptions.Exit(1)
+    console.print("[green]No failing checks[/green]")
+
+
+# ─── Goals and the auto loop (A4) ───
+
+
+@main.group()
+def goal():
+    """The target a person sets for a feature; `auto` works toward it and stops at checkpoints."""
+    pass
+
+
+@goal.command("set")
+@click.option("--repo", required=True)
+@click.option("--feature", required=True)
+@click.option("--min-pass-rate", default=1.0, show_default=True, help="Share of items that must PASS (0-1)")
+@click.option("--min-mean", default=0.0, show_default=True, help="Mean overall score (0-1)")
+@click.option("--max-regressions", default=0, show_default=True, help="Items allowed to fall below their baseline")
+@click.option("--min-judge-runs", default=3, show_default=True, help="Fewer judge runs than this make an item unreliable")
+@click.option("--note", default="", help="Why this goal, in a few words")
+def goal_set(repo: str, feature: str, min_pass_rate: float, min_mean: float, max_regressions: int,
+             min_judge_runs: int, note: str):
+    """Set the goal (a checkpoint: reviewer role)."""
+    from eval_agent.access import now
+    from eval_agent.goals import Goal, key, load_goals, save_goals
+
+    get_registry().get_feature(repo, feature)
+    goals = load_goals(HOME)
+    goals[key(repo, feature)] = Goal(min_pass_rate, min_mean, max_regressions, min_judge_runs, note,
+                                     set_by=current_user(), set_at=now())
+    save_goals(goals, HOME)
+    console.print(f"[green]Goal for {repo}/{feature} set by {current_user()}[/green]")
+    console.print(f"  Run toward it: eval-agent auto --repo {repo} --feature {feature}   (cron-friendly)")
+
+
+@goal.command("show")
+@click.option("--repo", required=True)
+@click.option("--feature", required=True)
+def goal_show(repo: str, feature: str):
+    """The goal and the latest auto passes."""
+    from eval_agent.goals import key, load_goals
+
+    g = load_goals(HOME).get(key(repo, feature))
+    if not g:
+        console.print(f"[yellow]No goal for {repo}/{feature}: eval-agent goal set --repo {repo} --feature {feature} ...[/yellow]")
+        return
+    console.print(f"[bold]{repo}/{feature}[/bold] — set by {g.set_by} at {g.set_at}{': ' + g.note if g.note else ''}")
+    console.print(f"  PASS ≥ {g.min_pass_rate:.0%} · mean ≥ {g.min_mean:.2f} · regressions ≤ {g.max_regressions} · "
+                  f"judge runs ≥ {g.min_judge_runs}")
+    store = get_store()
+    rows = store.auto_runs(repo, feature)
+    store.close()
+    for r in rows:
+        met = {1: "[green]met[/green]", 0: "[red]not met[/red]"}.get(r["goal_met"], "-")
+        console.print(f"  {r['at']}  {r['outcome']:10s} {met}  {r['batch_id'] or ''}  [dim]{r['code_ref'] or ''}[/dim]")
+
+
+@main.command("auto")
+@click.option("--repo", required=True)
+@click.option("--feature", required=True)
+@click.option("--repo-path", type=click.Path(exists=True, file_okay=False), help="Checkout to generate from (default: registered path)")
+@click.option("--target-url", help="Deployed server to get outputs from (see `run --target-url`)")
+@click.option("--target-key", envvar="TARGET_API_KEY", default="")
+@click.option("--force", is_flag=True, help="Evaluate even if the code did not change since the last batch")
+@click.option("--only", multiple=True, help="Only these items (a quick check; the goal is still checked on them)")
+@click.option("--runs", default=3, show_default=True)
+@click.option("--concurrency", default=8, show_default=True)
+@click.option("--model", envvar=["JUDGE_MODEL", "LLM_MODEL_NAME"], default=DEFAULT_MODEL, show_default=True)
+@click.option("--base-url", envvar=["JUDGE_BASE_URL", "LLM_BASE_URL"])
+@click.option("--api-key", envvar=["JUDGE_API_KEY", "LLM_API_KEY"], default="not-needed")
+def auto_cmd(repo: str, feature: str, repo_path: str | None, target_url: str | None, target_key: str, force: bool,
+             only: tuple[str, ...], runs: int, concurrency: int, model: str, base_url: str, api_key: str):
+    """Work toward the feature's goal: when the code changed, evaluate, compare, check the goal, draft the
+    fix report. Never passes a checkpoint: baseline, report approval and sending stay with people."""
+    import contextlib
+    import io
+
+    from eval_agent.goals import check_goal, key, load_goals
+
+    store = get_store()
+    g = load_goals(HOME).get(key(repo, feature))
+    if not g:
+        store.log_auto(repo, feature, "", "no-goal")
+        store.close()
+        console.print(f"[red]⛔ No goal for {repo}/{feature} — a person sets it first: eval-agent goal set ...[/red]")
+        raise click.exceptions.Exit(1)
+    code_path = Path(repo_path) if repo_path else get_registry().repo_path(repo)
+    ref = (f"{target_url} " if target_url else "") + git_ref(code_path)
+    last = store.latest_batch(repo, feature)
+    last_ref = store.batch_code_ref(last) if last else ""
+    if last and ref and ref == last_ref and not force:
+        store.log_auto(repo, feature, ref, "unchanged", last)
+        store.close()
+        console.print(f"[green]No change since batch {last} ({ref}) — nothing to evaluate[/green]")
+        return
+    store.close()
+
+    console.print(f"[bold]auto {repo}/{feature}[/bold]: {ref or 'unknown ref'} (last batch: {last_ref or '-'})")
+    ctx = click.get_current_context()
+    ctx.invoke(run_cmd, repo=repo, feature=feature, only=only, model=model, base_url=base_url, api_key=api_key,
+               runs=runs, concurrency=concurrency, save=True, set_baseline=False, allow_draft=False,
+               repo_path=repo_path, target_url=target_url, target_key=target_key)
+
+    store = get_store()
+    batch = store.latest_batch(repo, feature)
+    if not batch or batch == last:
+        store.log_auto(repo, feature, ref, "run-failed")
+        store.close()
+        console.print("[red]The run saved nothing (rubric not approved, or every item failed) — see above[/red]")
+        raise click.exceptions.Exit(1)
+    batch_runs = store.batch_runs(batch)
+    regressions = []
+    for r in batch_runs:
+        b = store.get_active_baseline(repo, feature, r["rubric_ver"], r["config_hash"])
+        if b and r["overall"] - b["overall"] < -0.10:
+            regressions.append(r["config_name"] or r["id"][:8])
+    result = check_goal(g, batch_runs, regressions, {r["config_name"] or r["id"][:8]: judge_runs(r) for r in batch_runs})
+    store.close()
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        ctx.invoke(compare_cmd, repo=repo, feature=feature, batch_a=None, batch_b=batch, markdown=True)
+    reports_dir = HOME / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    compare_path = reports_dir / f"{repo}-{feature}-{batch}-compare.md"
+    compare_path.write_text(buf.getvalue())
+
+    report_id = None
+    if not result.met:
+        ctx.invoke(analyze_cmd, repo=repo, feature=feature, batch=batch, max_score=7.0, context=None,
+                   model=model, base_url=base_url, api_key=api_key)
+        store = get_store()
+        pending = [r for r in store.list_reports(repo, feature, "pending_review") if r["batch_id"] == batch]
+        store.close()
+        report_id = pending[0]["id"] if pending else None
+
+    store = get_store()
+    store.log_auto(repo, feature, ref, "evaluated", batch, result.met, report_id, "; ".join(result.lines))
+    store.close()
+
+    console.print(f"\n[bold]Goal check — batch {batch}[/bold]")
+    for line in result.lines:
+        console.print(f"  {line}")
+    console.print(f"  Message for the team: {compare_path}")
+    console.print("\n[bold yellow]⏸  Waiting on you[/bold yellow]")
+    if result.met:
+        console.print(f"  • Goal met. Accept as the new reference: eval-agent baseline set --batch {batch}")
+    if report_id:
+        console.print(f"  • CP4 — review the fix suggestions: eval-agent report show {report_id} → report approve {report_id}")
 
 
 if __name__ == "__main__":
