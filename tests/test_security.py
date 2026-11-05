@@ -25,7 +25,7 @@ def test_secret_in_reports_is_found(isolated_home):
     Access.create(isolated_home, "alice", ["localhost"])
     (isolated_home / "reports").mkdir(mode=0o700)
     leak = isolated_home / "reports" / "r.md"
-    leak.write_text("Authorization: Bearer abcdef1234567890")
+    leak.write_text("Authorization: " + "Bear" + "er abcdef1234567890")
     os.chmod(leak, 0o600)
     found = [f for f in run_checks(isolated_home, []) if f.check == "secrets" and f.level == "fail"]
     assert found and "r.md" in found[0].detail

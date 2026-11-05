@@ -1,6 +1,7 @@
 """Goals a person sets for a feature, which `eval-agent auto` works toward without crossing checkpoints."""
 from __future__ import annotations
 
+import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -38,6 +39,7 @@ def save_goals(goals: dict[str, Goal], home: Path | None = None):
     path = (home or get_home()) / GOALS_FILE
     path.write_text("# Set with `eval-agent goal set` (a checkpoint); read by `eval-agent auto`.\n"
                     + yaml.safe_dump({k: asdict(g) for k, g in goals.items()}, sort_keys=False, allow_unicode=True))
+    os.chmod(path, 0o600)
 
 
 def key(repo: str, feature: str) -> str:
